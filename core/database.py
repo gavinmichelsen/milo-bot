@@ -7,9 +7,11 @@ workout logs, connected device tokens, and coaching history.
 
 import os
 import secrets
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+import httpx
 from supabase import create_client, Client
 
 from utils.logger import setup_logger
@@ -32,168 +34,158 @@ def get_supabase_client() -> Client:
         key = os.getenv("SUPABASE_KEY")
         if not url or not key:
             raise RuntimeError("SUPABASE_URL and SUPABASE_KEY must be set in .env")
+        logger.info(f"Connecting to Supabase at {url}")
         _client = create_client(url, key)
         logger.info("Supabase client initialized")
     return _client
 
 
-def get_user(telegram_id: int) -> Optional[dict]:
-    """Fetch a user profile by their Telegram ID.
+def _reset_client():
+    """Reset the singleton client so the next call recreates it."""
+    global _client
+    _client = None
+    logger.info("Supabase client reset — will reconnect on next call")
 
-    Args:
-        telegram_id: The user's Telegram user ID.
 
-    Returns:
-        User record dict or None if not found.
+def _retry_on_dns_error(func, *args, max_retries: int = 3, **kwargs):
+    """Retry a Supabase operation if DNS resolution fails.
+
+    Railway containers can experience transient DNS failures.
+    This wrapper retries with exponential backoff and resets
+    the Supabase client between attempts.
     """
-    client = get_supabase_client()
-    result = (
-        client.table("users")
-        .select("*")
-        .eq("telegram_id", telegram_id)
-        .execute()
-    )
-    if result.data:
-        return result.data[0]
-    return None
+    for attempt in range(max_retries):
+        try:
+            return func(*args, **kwargs)
+        except httpx.ConnectError as e:
+            if "Name or service not known" in str(e) or "Errno -2" in str(e):
+                logger.warning(
+                    f"DNS resolution failed (attempt {attempt + 1}/{max_retries}): {e}"
+                )
+                _reset_client()
+                if attempt < max_retries - 1:
+                    time.sleep(1 * (attempt + 1))
+                else:
+                    raise
+            else:
+                raise
+
+
+def get_user(telegram_id: int) -> Optional[dict]:
+    """Fetch a user profile by their Telegram ID."""
+    def _query():
+        client = get_supabase_client()
+        result = (
+            client.table("users")
+            .select("*")
+            .eq("telegram_id", telegram_id)
+            .execute()
+        )
+        if result.data:
+            return result.data[0]
+        return None
+    return _retry_on_dns_error(_query)
 
 
 def upsert_user(telegram_id: int, username: Optional[str], first_name: Optional[str], last_name: Optional[str]) -> dict:
-    """Create or update a user profile.
-
-    Uses telegram_id as the conflict key — if the user already exists
-    their username, first_name, and last_name are updated, otherwise
-    a new row is created.
-
-    Args:
-        telegram_id: The user's Telegram user ID.
-        username: The user's Telegram @username (may be None).
-        first_name: The user's Telegram first name (may be None).
-        last_name: The user's Telegram last name (may be None).
-
-    Returns:
-        The upserted user record.
-    """
-    client = get_supabase_client()
-    row = {
-        "telegram_id": telegram_id,
-        "username": username,
-        "first_name": first_name,
-        "last_name": last_name,
-    }
-    result = (
-        client.table("users")
-        .upsert(row, on_conflict="telegram_id")
-        .execute()
-    )
-    logger.info(f"Upserted user: {telegram_id} (@{username})")
-    return result.data[0]
+    """Create or update a user profile."""
+    def _query():
+        client = get_supabase_client()
+        row = {
+            "telegram_id": telegram_id,
+            "username": username,
+            "first_name": first_name,
+            "last_name": last_name,
+        }
+        result = (
+            client.table("users")
+            .upsert(row, on_conflict="telegram_id")
+            .execute()
+        )
+        logger.info(f"Upserted user: {telegram_id} (@{username})")
+        return result.data[0]
+    return _retry_on_dns_error(_query)
 
 
 def create_oauth_state(telegram_id: int) -> str:
-    """Create a unique OAuth state token tied to a telegram_id.
-
-    The state is stored in Supabase with a 10-minute expiry
-    and used to validate the OAuth callback (CSRF protection).
-
-    Returns:
-        The state string to embed in the OAuth URL.
-    """
-    client = get_supabase_client()
+    """Create a unique OAuth state token tied to a telegram_id."""
     state = secrets.token_urlsafe(32)
-    expires_at = (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()
-    client.table("oauth_states").insert({
-        "telegram_id": telegram_id,
-        "state": state,
-        "expires_at": expires_at,
-    }).execute()
-    logger.info(f"Created OAuth state for telegram_id={telegram_id}")
-    return state
+    def _query():
+        client = get_supabase_client()
+        expires_at = (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()
+        client.table("oauth_states").insert({
+            "telegram_id": telegram_id,
+            "state": state,
+            "expires_at": expires_at,
+        }).execute()
+        logger.info(f"Created OAuth state for telegram_id={telegram_id}")
+        return state
+    return _retry_on_dns_error(_query)
 
 
 def validate_oauth_state(state: str) -> Optional[int]:
-    """Validate an OAuth state token and return the associated telegram_id.
+    """Validate an OAuth state token and return the associated telegram_id."""
+    def _query():
+        client = get_supabase_client()
+        result = (
+            client.table("oauth_states")
+            .select("telegram_id, expires_at")
+            .eq("state", state)
+            .execute()
+        )
+        if not result.data:
+            return None
 
-    Deletes the state row after validation (single-use).
+        row = result.data[0]
+        expires_at = datetime.fromisoformat(row["expires_at"].replace("Z", "+00:00"))
+        if datetime.now(timezone.utc) > expires_at:
+            client.table("oauth_states").delete().eq("state", state).execute()
+            return None
 
-    Args:
-        state: The state string from the OAuth callback.
-
-    Returns:
-        The telegram_id if valid, None if invalid or expired.
-    """
-    client = get_supabase_client()
-    result = (
-        client.table("oauth_states")
-        .select("telegram_id, expires_at")
-        .eq("state", state)
-        .execute()
-    )
-    if not result.data:
-        return None
-
-    row = result.data[0]
-    expires_at = datetime.fromisoformat(row["expires_at"].replace("Z", "+00:00"))
-    if datetime.now(timezone.utc) > expires_at:
         client.table("oauth_states").delete().eq("state", state).execute()
-        return None
-
-    # Valid — delete the state (single-use) and return telegram_id
-    client.table("oauth_states").delete().eq("state", state).execute()
-    return row["telegram_id"]
+        return row["telegram_id"]
+    return _retry_on_dns_error(_query)
 
 
 def store_whoop_tokens(telegram_id: int, token_data: dict) -> dict:
-    """Store or update Whoop OAuth tokens for a user.
-
-    Args:
-        telegram_id: The user's Telegram ID.
-        token_data: Token response from Whoop containing
-                    access_token, refresh_token, expires_in.
-
-    Returns:
-        The upserted token record.
-    """
-    client = get_supabase_client()
-    expires_at = (
-        datetime.now(timezone.utc) + timedelta(seconds=token_data["expires_in"])
-    ).isoformat()
-    row = {
-        "telegram_id": telegram_id,
-        "access_token": token_data["access_token"],
-        "refresh_token": token_data["refresh_token"],
-        "expires_at": expires_at,
-        "scopes": token_data.get("scope", ""),
-        "updated_at": datetime.now(timezone.utc).isoformat(),
-    }
-    result = (
-        client.table("whoop_tokens")
-        .upsert(row, on_conflict="telegram_id")
-        .execute()
-    )
-    logger.info(f"Stored Whoop tokens for telegram_id={telegram_id}")
-    return result.data[0]
+    """Store or update Whoop OAuth tokens for a user."""
+    def _query():
+        client = get_supabase_client()
+        expires_at = (
+            datetime.now(timezone.utc) + timedelta(seconds=token_data["expires_in"])
+        ).isoformat()
+        row = {
+            "telegram_id": telegram_id,
+            "access_token": token_data["access_token"],
+            "refresh_token": token_data["refresh_token"],
+            "expires_at": expires_at,
+            "scopes": token_data.get("scope", ""),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        result = (
+            client.table("whoop_tokens")
+            .upsert(row, on_conflict="telegram_id")
+            .execute()
+        )
+        logger.info(f"Stored Whoop tokens for telegram_id={telegram_id}")
+        return result.data[0]
+    return _retry_on_dns_error(_query)
 
 
 def get_whoop_tokens(telegram_id: int) -> Optional[dict]:
-    """Fetch stored Whoop tokens for a user.
-
-    Args:
-        telegram_id: The user's Telegram ID.
-
-    Returns:
-        Token record dict or None if not connected.
-    """
-    client = get_supabase_client()
-    result = (
-        client.table("whoop_tokens")
-        .select("*")
-        .eq("telegram_id", telegram_id)
-        .execute()
-    )
-    if result.data:
-        return result.data[0]
-    return None
+    """Fetch stored Whoop tokens for a user."""
+    def _query():
+        client = get_supabase_client()
+        result = (
+            client.table("whoop_tokens")
+            .select("*")
+            .eq("telegram_id", telegram_id)
+            .execute()
+        )
+        if result.data:
+            return result.data[0]
+        return None
+    return _retry_on_dns_error(_query)
 
 
 async def log_workout(telegram_id: int, exercise: str, sets: int, reps: int, weight: float) -> dict:

@@ -81,16 +81,27 @@ async def connect_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info(f"/connect from user {telegram_id}")
 
     # Check if already connected
-    existing = get_whoop_tokens(telegram_id)
-    if existing:
-        await update.message.reply_text(
-            "Your Whoop is already connected!\n\n"
-            "Use /stats to see your latest data. "
-            "To reconnect, tap the button below.",
-        )
+    try:
+        existing = get_whoop_tokens(telegram_id)
+        if existing:
+            await update.message.reply_text(
+                "Your Whoop is already connected!\n\n"
+                "Use /stats to see your latest data. "
+                "To reconnect, tap the button below.",
+            )
+    except Exception as e:
+        logger.error(f"Failed to check Whoop tokens for {telegram_id}: {e}")
 
     # Generate OAuth state and URL
-    state = create_oauth_state(telegram_id)
+    try:
+        state = create_oauth_state(telegram_id)
+    except Exception as e:
+        logger.error(f"Failed to create OAuth state for {telegram_id}: {e}")
+        await update.message.reply_text(
+            "Something went wrong. Please try /connect again in a moment."
+        )
+        return
+
     whoop = WhoopClient()
     auth_url = whoop.get_auth_url(WHOOP_REDIRECT_URI, state)
 
