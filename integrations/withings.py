@@ -29,12 +29,16 @@ REDIRECT_URI = os.getenv(
 )
 
 
-def _sign(params: dict, client_secret: str) -> str:
-    """Generate HMAC-SHA256 signature from sorted param values."""
-    sorted_values = ",".join(str(params[k]) for k in sorted(params.keys()))
+def _sign(values: list, client_secret: str) -> str:
+    """Generate HMAC-SHA256 signature from ordered values.
+
+    Withings signs only specific fields (action, client_id, nonce/timestamp),
+    NOT all request params. The caller provides the values in correct order.
+    """
+    message = ",".join(str(v) for v in values)
     return hmac.new(
         client_secret.encode(),
-        sorted_values.encode(),
+        message.encode(),
         hashlib.sha256,
     ).hexdigest()
 
@@ -57,13 +61,14 @@ async def _get_nonce() -> str:
     client_secret = os.getenv("WITHINGS_CLIENT_SECRET")
     ts = str(int(time.time()))
 
+    # Withings signs: action, client_id, timestamp (in that order)
+    signature = _sign(["getnonce", client_id, ts], client_secret)
     params = {
         "action": "getnonce",
         "client_id": client_id,
         "timestamp": ts,
+        "signature": signature,
     }
-    signature = _sign(params, client_secret)
-    params["signature"] = signature
 
     async with httpx.AsyncClient(timeout=15.0) as client:
         resp = await client.post(WITHINGS_SIGNATURE_URL, data=params)
@@ -80,6 +85,8 @@ async def exchange_token(code: str) -> dict:
     client_secret = os.getenv("WITHINGS_CLIENT_SECRET")
     nonce = await _get_nonce()
 
+    # Withings signs only: action, client_id, nonce (in that order)
+    signature = _sign(["requesttoken", client_id, nonce], client_secret)
     params = {
         "action": "requesttoken",
         "grant_type": "authorization_code",
@@ -87,8 +94,8 @@ async def exchange_token(code: str) -> dict:
         "code": code,
         "redirect_uri": REDIRECT_URI,
         "nonce": nonce,
+        "signature": signature,
     }
-    params["signature"] = _sign(params, client_secret)
 
     async with httpx.AsyncClient(timeout=15.0) as client:
         resp = await client.post(WITHINGS_TOKEN_URL, data=params)
@@ -105,14 +112,16 @@ async def refresh_withings_token(refresh_token: str) -> dict:
     client_secret = os.getenv("WITHINGS_CLIENT_SECRET")
     nonce = await _get_nonce()
 
+    # Withings signs only: action, client_id, nonce (in that order)
+    signature = _sign(["requesttoken", client_id, nonce], client_secret)
     params = {
         "action": "requesttoken",
         "grant_type": "refresh_token",
         "client_id": client_id,
         "refresh_token": refresh_token,
         "nonce": nonce,
+        "signature": signature,
     }
-    params["signature"] = _sign(params, client_secret)
 
     async with httpx.AsyncClient(timeout=15.0) as client:
         resp = await client.post(WITHINGS_TOKEN_URL, data=params)
