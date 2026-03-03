@@ -1,13 +1,17 @@
 """
 Withings API integration for Milo bot.
 
-Handles OAuth 2.0 authentication and fetching body composition
-data (weight, body fat %, muscle mass) from the Withings platform.
+Handles OAuth 2.0 authentication (with HMAC-SHA256 signed requests)
+and fetching weight, body fat, and body composition data.
 
 Withings API docs: https://developer.withings.com/
 """
 
+import hashlib
+import hmac
 import os
+import time
+from urllib.parse import urlencode
 
 import httpx
 
@@ -18,90 +22,140 @@ logger = setup_logger("milo.withings")
 WITHINGS_AUTH_URL = "https://account.withings.com/oauth2_user/authorize2"
 WITHINGS_TOKEN_URL = "https://wbsapi.withings.net/v2/oauth2"
 WITHINGS_MEASURE_URL = "https://wbsapi.withings.net/measure"
+WITHINGS_SIGNATURE_URL = "https://wbsapi.withings.net/v2/signature"
+REDIRECT_URI = os.getenv(
+    "WITHINGS_REDIRECT_URI",
+    "https://worker-production-526b.up.railway.app/auth/withings/callback",
+)
 
 
-class WithingsClient:
-    """Client for interacting with the Withings API.
+def _sign(params: dict, client_secret: str) -> str:
+    """Generate HMAC-SHA256 signature from sorted param values."""
+    sorted_values = ",".join(str(params[k]) for k in sorted(params.keys()))
+    return hmac.new(
+        client_secret.encode(),
+        sorted_values.encode(),
+        hashlib.sha256,
+    ).hexdigest()
 
-    Manages OAuth tokens and provides methods to fetch
-    body composition measurements for a user.
-    """
 
-    def __init__(self):
-        self.client_id = os.getenv("WITHINGS_CLIENT_ID")
-        self.client_secret = os.getenv("WITHINGS_CLIENT_SECRET")
-        self.http = httpx.AsyncClient()
+def get_auth_url(state: str) -> str:
+    """Build the Withings OAuth authorization URL."""
+    params = {
+        "response_type": "code",
+        "client_id": os.getenv("WITHINGS_CLIENT_ID"),
+        "redirect_uri": REDIRECT_URI,
+        "scope": "user.metrics",
+        "state": state,
+    }
+    return f"{WITHINGS_AUTH_URL}?{urlencode(params)}"
 
-    def get_auth_url(self, redirect_uri: str, state: str) -> str:
-        """Generate the OAuth authorization URL for a user to connect Withings.
 
-        Args:
-            redirect_uri: Callback URL after authorization.
-            state: Unique state parameter to prevent CSRF.
+async def _get_nonce() -> str:
+    """Fetch a nonce from Withings for request signing."""
+    client_id = os.getenv("WITHINGS_CLIENT_ID")
+    client_secret = os.getenv("WITHINGS_CLIENT_SECRET")
+    ts = str(int(time.time()))
 
-        Returns:
-            Full authorization URL to redirect the user to.
-        """
-        params = {
-            "response_type": "code",
-            "client_id": self.client_id,
-            "redirect_uri": redirect_uri,
-            "scope": "user.metrics",
-            "state": state,
-        }
-        query = "&".join(f"{k}={v}" for k, v in params.items())
-        return f"{WITHINGS_AUTH_URL}?{query}"
+    params = {
+        "action": "getnonce",
+        "client_id": client_id,
+        "timestamp": ts,
+    }
+    signature = _sign(params, client_secret)
+    params["signature"] = signature
 
-    async def exchange_token(self, code: str, redirect_uri: str) -> dict:
-        """Exchange an authorization code for access and refresh tokens.
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        resp = await client.post(WITHINGS_SIGNATURE_URL, data=params)
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("status") != 0:
+            raise Exception(f"Withings nonce error: {data}")
+        return data["body"]["nonce"]
 
-        Args:
-            code: Authorization code from the OAuth callback.
-            redirect_uri: The same redirect URI used in the auth request.
 
-        Returns:
-            Token response dict with access_token, refresh_token, etc.
-        """
-        response = await self.http.post(
-            WITHINGS_TOKEN_URL,
-            data={
-                "action": "requesttoken",
-                "grant_type": "authorization_code",
-                "code": code,
-                "redirect_uri": redirect_uri,
-                "client_id": self.client_id,
-                "client_secret": self.client_secret,
-            },
-        )
-        response.raise_for_status()
-        logger.info("Successfully exchanged Withings OAuth token")
-        return response.json()
+async def exchange_token(code: str) -> dict:
+    """Exchange authorization code for access + refresh tokens."""
+    client_id = os.getenv("WITHINGS_CLIENT_ID")
+    client_secret = os.getenv("WITHINGS_CLIENT_SECRET")
+    nonce = await _get_nonce()
 
-    async def get_body_measures(self, access_token: str) -> dict:
-        """Fetch the latest body composition measurements.
+    params = {
+        "action": "requesttoken",
+        "grant_type": "authorization_code",
+        "client_id": client_id,
+        "code": code,
+        "redirect_uri": REDIRECT_URI,
+        "nonce": nonce,
+    }
+    params["signature"] = _sign(params, client_secret)
 
-        Retrieves weight, body fat percentage, muscle mass,
-        and other body metrics from the user's Withings account.
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        resp = await client.post(WITHINGS_TOKEN_URL, data=params)
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("status") != 0:
+            raise Exception(f"Withings token exchange error: {data}")
+        return data["body"]
 
-        Args:
-            access_token: Valid Withings access token.
 
-        Returns:
-            Measurement data including weight, body fat, and muscle mass.
-        """
-        response = await self.http.post(
+async def refresh_withings_token(refresh_token: str) -> dict:
+    """Refresh an expired Withings access token."""
+    client_id = os.getenv("WITHINGS_CLIENT_ID")
+    client_secret = os.getenv("WITHINGS_CLIENT_SECRET")
+    nonce = await _get_nonce()
+
+    params = {
+        "action": "requesttoken",
+        "grant_type": "refresh_token",
+        "client_id": client_id,
+        "refresh_token": refresh_token,
+        "nonce": nonce,
+    }
+    params["signature"] = _sign(params, client_secret)
+
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        resp = await client.post(WITHINGS_TOKEN_URL, data=params)
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("status") != 0:
+            raise Exception(f"Withings token refresh error: {data}")
+        return data["body"]
+
+
+async def get_latest_measurements(access_token: str) -> dict:
+    """Fetch latest weight, body fat % from Withings."""
+    params = {
+        "action": "getmeas",
+        "meastype": "1,6,8",
+        "category": 1,
+        "lastupdate": int(time.time()) - (30 * 24 * 60 * 60),
+    }
+    headers = {"Authorization": f"Bearer {access_token}"}
+
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        resp = await client.post(
             WITHINGS_MEASURE_URL,
-            headers={"Authorization": f"Bearer {access_token}"},
-            data={
-                "action": "getmeas",
-                "meastypes": "1,6,76",  # Weight, Fat %, Muscle Mass
-                "category": 1,  # Real measurements only
-                "lastupdate": 0,
-            },
+            data=params,
+            headers=headers,
         )
-        response.raise_for_status()
-        return response.json()
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("status") != 0:
+            raise Exception(f"Withings measure error: {data}")
 
-    async def close(self):
-        """Close the underlying HTTP client."""
-        await self.http.aclose()
+        measuregrps = data["body"].get("measuregrps", [])
+        if not measuregrps:
+            return {}
+
+        latest = measuregrps[0]["measures"]
+        result = {}
+        for m in latest:
+            value = m["value"] * (10 ** m["unit"])
+            if m["type"] == 1:
+                result["weight_kg"] = round(value, 1)
+            elif m["type"] == 6:
+                result["fat_ratio"] = round(value, 1)
+            elif m["type"] == 8:
+                result["fat_mass_kg"] = round(value, 1)
+        return result

@@ -205,6 +205,62 @@ def get_all_whoop_tokens() -> list:
     return _retry_on_dns_error(_query)
 
 
+def store_withings_tokens(telegram_id: int, token_data: dict) -> None:
+    """Store Withings OAuth tokens via direct HTTP."""
+    supabase_url = os.getenv("SUPABASE_URL")
+    supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY")
+
+    headers = {
+        "apikey": supabase_key,
+        "Authorization": f"Bearer {supabase_key}",
+        "Content-Type": "application/json",
+        "Prefer": "resolution=merge-duplicates,return=minimal",
+    }
+
+    payload = {
+        "telegram_id": telegram_id,
+        "access_token": token_data.get("access_token"),
+        "refresh_token": token_data.get("refresh_token"),
+        "expires_in": token_data.get("expires_in"),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    transport = httpx.HTTPTransport(retries=3)
+    with httpx.Client(transport=transport, timeout=15.0) as client:
+        response = client.post(
+            f"{supabase_url}/rest/v1/withings_tokens",
+            headers=headers,
+            json=payload,
+        )
+        response.raise_for_status()
+    logger.info(f"Stored Withings tokens for telegram_id={telegram_id}")
+
+
+def get_withings_tokens(telegram_id: int) -> Optional[dict]:
+    """Fetch stored Withings tokens for a user."""
+    def _query():
+        client = get_supabase_client()
+        result = (
+            client.table("withings_tokens")
+            .select("*")
+            .eq("telegram_id", telegram_id)
+            .execute()
+        )
+        if result.data:
+            return result.data[0]
+        return None
+    return _retry_on_dns_error(_query)
+
+
+def get_all_withings_tokens() -> list:
+    """Return all rows from withings_tokens table."""
+    def _query():
+        client = get_supabase_client()
+        result = client.table("withings_tokens").select("*").execute()
+        return result.data or []
+    return _retry_on_dns_error(_query)
+
+
 def log_workout(telegram_id: int, exercise: str, sets: int, reps: int, weight: float) -> dict:
     """Log a workout entry for a user."""
     def _query():

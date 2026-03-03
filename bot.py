@@ -28,6 +28,7 @@ from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, fil
 from core.handlers import (
     start_handler,
     connect_handler,
+    connect_withings_handler,
     stats_handler,
     progress_handler,
     log_handler,
@@ -58,6 +59,7 @@ async def main():
     # Register command handlers
     tg_app.add_handler(CommandHandler("start", start_handler))
     tg_app.add_handler(CommandHandler("connect", connect_handler))
+    tg_app.add_handler(CommandHandler("connectwithings", connect_withings_handler))
     tg_app.add_handler(CommandHandler("stats", stats_handler))
     tg_app.add_handler(CommandHandler("progress", progress_handler))
     tg_app.add_handler(CommandHandler("log", log_handler))

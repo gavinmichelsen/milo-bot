@@ -75,10 +75,55 @@ async def refresh_whoop_tokens_job():
     logger.info(f"Whoop token refresh complete: {refreshed} refreshed, {failed} failed")
 
 
+async def refresh_withings_tokens_job():
+    """Refresh Withings access tokens for all connected users.
+
+    Runs every 2.5 hours. Withings tokens expire after 3 hours,
+    so this keeps them fresh with a 30-minute buffer.
+    """
+    from core.database import get_all_withings_tokens, store_withings_tokens
+    from integrations.withings import refresh_withings_token
+
+    logger.info("Running Withings token refresh job")
+
+    try:
+        all_tokens = get_all_withings_tokens()
+    except Exception as e:
+        logger.error(f"Failed to fetch withings_tokens table: {e}")
+        return
+
+    if not all_tokens:
+        logger.info("No Withings tokens to refresh")
+        return
+
+    refreshed = 0
+    failed = 0
+
+    for row in all_tokens:
+        telegram_id = row.get("telegram_id")
+        refresh_token = row.get("refresh_token")
+
+        if not refresh_token:
+            logger.warning(f"No refresh_token for Withings telegram_id={telegram_id}, skipping")
+            failed += 1
+            continue
+
+        try:
+            new_tokens = await refresh_withings_token(refresh_token)
+            store_withings_tokens(telegram_id, new_tokens)
+            refreshed += 1
+        except Exception as e:
+            logger.error(f"Failed to refresh Withings token for telegram_id={telegram_id}: {e}")
+            failed += 1
+
+    logger.info(f"Withings token refresh complete: {refreshed} refreshed, {failed} failed")
+
+
 async def start_scheduler(app):
     """Register all scheduled jobs and start the scheduler."""
     scheduler.add_job(morning_checkin, "cron", hour=7, minute=0, id="morning_checkin")
     scheduler.add_job(weekly_progress_summary, "cron", day_of_week="sun", hour=18, minute=0, id="weekly_summary")
     scheduler.add_job(refresh_whoop_tokens_job, "interval", minutes=50, id="whoop_token_refresh")
+    scheduler.add_job(refresh_withings_tokens_job, "interval", minutes=150, id="withings_token_refresh")
     scheduler.start()
-    logger.info("Scheduler started with morning check-in (7:00 AM), weekly summary (Sunday 6:00 PM), and Whoop token refresh (every 50 min)")
+    logger.info("Scheduler started with morning check-in (7:00 AM), weekly summary (Sunday 6:00 PM), Whoop token refresh (every 50 min), Withings token refresh (every 2.5 hr)")

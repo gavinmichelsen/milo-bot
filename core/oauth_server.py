@@ -168,15 +168,86 @@ async def health(request):
     return web.Response(text="ok")
 
 
-async def withings_callback_placeholder(request):
-    return web.Response(text="ok", status=200)
+async def withings_callback(request):
+    """Handle the Withings OAuth callback."""
+    from core.oauth_state import validate_state
+    from integrations.withings import exchange_token as withings_exchange_token
+
+    error = request.query.get("error")
+    if error:
+        logger.warning(f"Withings OAuth error: {error}")
+        return web.Response(
+            text="Authorization denied. You can close this window and try /connectwithings again in Telegram.",
+            content_type="text/html",
+            status=400,
+        )
+
+    code = request.query.get("code")
+    state = request.query.get("state")
+
+    if not code or not state:
+        return web.Response(text="Missing code or state parameter.", status=400)
+
+    telegram_id = validate_state(state)
+    if telegram_id is None:
+        logger.warning(f"Invalid or expired Withings OAuth state: {state}")
+        return web.Response(
+            text="This link has expired. Please run /connectwithings again in Telegram.",
+            content_type="text/html",
+            status=400,
+        )
+
+    # Exchange code immediately — Withings codes expire in 30 seconds
+    try:
+        token_data = await withings_exchange_token(code)
+    except Exception as e:
+        logger.error(f"Withings token exchange failed: {e}")
+        return web.Response(
+            text="Something went wrong connecting your Withings. Please try /connectwithings again.",
+            content_type="text/html",
+            status=500,
+        )
+
+    try:
+        from core.database import store_withings_tokens
+        store_withings_tokens(telegram_id, token_data)
+    except Exception as e:
+        logger.error(f"Failed to store Withings tokens for {telegram_id}: {e}")
+        return web.Response(
+            text="Failed to save your connection. Please try again.",
+            content_type="text/html",
+            status=500,
+        )
+
+    if _bot:
+        try:
+            await _bot.send_message(
+                chat_id=telegram_id,
+                text=(
+                    "Your Withings scale is now connected!\n\n"
+                    "I can see your weight and body composition data. "
+                    "Try /stats to see your latest metrics."
+                ),
+            )
+        except Exception as e:
+            logger.error(f"Failed to send Telegram confirmation to {telegram_id}: {e}")
+
+    return web.Response(
+        text=(
+            "<html><body style='font-family:sans-serif;text-align:center;padding:60px;'>"
+            "<h2>Withings Connected!</h2>"
+            "<p>You can close this window and return to Telegram.</p>"
+            "</body></html>"
+        ),
+        content_type="text/html",
+    )
 
 
 def create_web_app():
     """Create and configure the aiohttp web application."""
     app = web.Application()
     app.router.add_get("/auth/whoop/callback", whoop_callback)
-    app.router.add_get("/auth/withings/callback", withings_callback_placeholder)
+    app.router.add_get("/auth/withings/callback", withings_callback)
     app.router.add_get("/health", health)
     app.router.add_get("/debug/dns", debug_dns)
     return app

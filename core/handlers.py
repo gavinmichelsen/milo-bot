@@ -105,6 +105,33 @@ async def connect_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
+async def connect_withings_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle the /connectwithings command — generate Withings OAuth link."""
+    from integrations.withings import get_auth_url
+    telegram_id = update.effective_user.id
+    logger.info(f"/connectwithings from user {telegram_id}")
+
+    try:
+        state = create_state(telegram_id)
+        url = get_auth_url(state)
+
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("Connect Withings", url=url)]
+        ])
+
+        await update.message.reply_text(
+            "Tap the button below to connect your Withings scale.\n\n"
+            "You'll be redirected to Withings to authorize access to your "
+            "weight and body composition data.",
+            reply_markup=keyboard,
+        )
+    except Exception as e:
+        logger.error(f"/connectwithings failed for {telegram_id}: {e}")
+        await update.message.reply_text(
+            "Something went wrong. Please try /connectwithings again in a moment."
+        )
+
+
 async def stats_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle the /stats command — fetch and display latest Whoop recovery data."""
     telegram_id = update.effective_user.id
