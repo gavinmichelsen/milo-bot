@@ -8,6 +8,7 @@ Whoop API docs: https://developer.whoop.com/
 """
 
 import os
+from urllib.parse import urlencode
 
 import httpx
 
@@ -49,8 +50,7 @@ class WhoopClient:
             "scope": "read:recovery read:sleep read:workout read:body_measurement",
             "state": state,
         }
-        query = "&".join(f"{k}={v}" for k, v in params.items())
-        return f"{WHOOP_AUTH_URL}?{query}"
+        return f"{WHOOP_AUTH_URL}?{urlencode(params)}"
 
     async def exchange_token(self, code: str, redirect_uri: str) -> dict:
         """Exchange an authorization code for access and refresh tokens.

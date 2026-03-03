@@ -6,13 +6,21 @@ and is registered in bot.py. Conversational messages are routed
 to the Claude agent for AI coaching responses.
 """
 
-from telegram import Update
+import os
+
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
 from agent import get_coaching_response
-from core.database import upsert_user
+from core.database import upsert_user, create_oauth_state, get_whoop_tokens
+from integrations.whoop import WhoopClient
 from utils.logger import setup_logger
+
+WHOOP_REDIRECT_URI = os.getenv(
+    "WHOOP_REDIRECT_URI",
+    "https://worker-production-526b.up.railway.app/auth/whoop/callback",
+)
 
 logger = setup_logger("milo.handlers")
 
@@ -68,13 +76,33 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def connect_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle the /connect command for device integration."""
-    logger.info(f"/connect from user {update.effective_user.id}")
+    """Handle the /connect command — generate Whoop OAuth link."""
+    telegram_id = update.effective_user.id
+    logger.info(f"/connect from user {telegram_id}")
+
+    # Check if already connected
+    existing = get_whoop_tokens(telegram_id)
+    if existing:
+        await update.message.reply_text(
+            "Your Whoop is already connected!\n\n"
+            "Use /stats to see your latest data. "
+            "To reconnect, tap the button below.",
+        )
+
+    # Generate OAuth state and URL
+    state = create_oauth_state(telegram_id)
+    whoop = WhoopClient()
+    auth_url = whoop.get_auth_url(WHOOP_REDIRECT_URI, state)
+
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("Connect Whoop", url=auth_url)]
+    ])
+
     await update.message.reply_text(
-        "Whoop and Withings integration is coming soon.\n\n"
-        "Once connected, I'll use your recovery scores, sleep data, "
-        "and body composition metrics to personalize every recommendation.",
-        parse_mode="Markdown",
+        "Tap the button below to connect your Whoop account.\n\n"
+        "You'll be redirected to Whoop to authorize access to your "
+        "recovery, sleep, and workout data.",
+        reply_markup=keyboard,
     )
 
 

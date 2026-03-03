@@ -6,6 +6,8 @@ workout logs, connected device tokens, and coaching history.
 """
 
 import os
+import secrets
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from supabase import create_client, Client
@@ -86,6 +88,112 @@ def upsert_user(telegram_id: int, username: Optional[str], first_name: Optional[
     )
     logger.info(f"Upserted user: {telegram_id} (@{username})")
     return result.data[0]
+
+
+def create_oauth_state(telegram_id: int) -> str:
+    """Create a unique OAuth state token tied to a telegram_id.
+
+    The state is stored in Supabase with a 10-minute expiry
+    and used to validate the OAuth callback (CSRF protection).
+
+    Returns:
+        The state string to embed in the OAuth URL.
+    """
+    client = get_supabase_client()
+    state = secrets.token_urlsafe(32)
+    expires_at = (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()
+    client.table("oauth_states").insert({
+        "telegram_id": telegram_id,
+        "state": state,
+        "expires_at": expires_at,
+    }).execute()
+    logger.info(f"Created OAuth state for telegram_id={telegram_id}")
+    return state
+
+
+def validate_oauth_state(state: str) -> Optional[int]:
+    """Validate an OAuth state token and return the associated telegram_id.
+
+    Deletes the state row after validation (single-use).
+
+    Args:
+        state: The state string from the OAuth callback.
+
+    Returns:
+        The telegram_id if valid, None if invalid or expired.
+    """
+    client = get_supabase_client()
+    result = (
+        client.table("oauth_states")
+        .select("telegram_id, expires_at")
+        .eq("state", state)
+        .execute()
+    )
+    if not result.data:
+        return None
+
+    row = result.data[0]
+    expires_at = datetime.fromisoformat(row["expires_at"].replace("Z", "+00:00"))
+    if datetime.now(timezone.utc) > expires_at:
+        client.table("oauth_states").delete().eq("state", state).execute()
+        return None
+
+    # Valid — delete the state (single-use) and return telegram_id
+    client.table("oauth_states").delete().eq("state", state).execute()
+    return row["telegram_id"]
+
+
+def store_whoop_tokens(telegram_id: int, token_data: dict) -> dict:
+    """Store or update Whoop OAuth tokens for a user.
+
+    Args:
+        telegram_id: The user's Telegram ID.
+        token_data: Token response from Whoop containing
+                    access_token, refresh_token, expires_in.
+
+    Returns:
+        The upserted token record.
+    """
+    client = get_supabase_client()
+    expires_at = (
+        datetime.now(timezone.utc) + timedelta(seconds=token_data["expires_in"])
+    ).isoformat()
+    row = {
+        "telegram_id": telegram_id,
+        "access_token": token_data["access_token"],
+        "refresh_token": token_data["refresh_token"],
+        "expires_at": expires_at,
+        "scopes": token_data.get("scope", ""),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    result = (
+        client.table("whoop_tokens")
+        .upsert(row, on_conflict="telegram_id")
+        .execute()
+    )
+    logger.info(f"Stored Whoop tokens for telegram_id={telegram_id}")
+    return result.data[0]
+
+
+def get_whoop_tokens(telegram_id: int) -> Optional[dict]:
+    """Fetch stored Whoop tokens for a user.
+
+    Args:
+        telegram_id: The user's Telegram ID.
+
+    Returns:
+        Token record dict or None if not connected.
+    """
+    client = get_supabase_client()
+    result = (
+        client.table("whoop_tokens")
+        .select("*")
+        .eq("telegram_id", telegram_id)
+        .execute()
+    )
+    if result.data:
+        return result.data[0]
+    return None
 
 
 async def log_workout(telegram_id: int, exercise: str, sets: int, reps: int, weight: float) -> dict:
