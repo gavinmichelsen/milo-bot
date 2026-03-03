@@ -78,7 +78,7 @@ async def main():
     logger.info(f"OAuth callback server listening on port {port}")
 
     # Start Telegram polling
-    await tg_app.updater.start_polling()
+    await tg_app.updater.start_polling(drop_pending_updates=True)
     logger.info("Milo is live. Polling for messages...")
 
     # Keep running until SIGINT/SIGTERM
