@@ -105,9 +105,7 @@ milo-bot/
 
 ## License
 
-Copyright (c) 2026 Gavin Michelsen. All rights reserved.
-
-This project is open source for viewing and learning purposes. See [LICENSE](LICENSE) for terms.
+This project is licensed under [CC BY-NC 4.0](LICENSE). You can view, fork, and learn from the code — but commercial use is not permitted without permission.
 
 ---
 
