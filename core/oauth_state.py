@@ -1,51 +1,49 @@
 """
-In-memory OAuth state management.
+Supabase-backed OAuth state management.
 
-Stores OAuth state tokens in a simple dict with TTL expiry.
-This avoids depending on Supabase for the /connect flow,
-which is critical since Railway containers may have DNS issues
-reaching external services.
+Stores OAuth state tokens in Supabase so they survive across
+multiple Railway container instances.
 """
 
 import secrets
-import time
+from datetime import datetime, timezone, timedelta
 from typing import Optional
 
+from core.database import get_supabase_client
 from utils.logger import setup_logger
 
 logger = setup_logger("milo.oauth_state")
 
-# In-memory store: state -> (telegram_id, expires_at_timestamp)
-_states: dict = {}
-
-# States expire after 10 minutes
 STATE_TTL_SECONDS = 600
 
 
 def create_state(telegram_id: int) -> str:
-    """Generate a unique OAuth state token for a user."""
-    _cleanup_expired()
+    """Generate a unique OAuth state token and persist it to Supabase."""
     state = secrets.token_urlsafe(32)
-    _states[state] = (telegram_id, time.time() + STATE_TTL_SECONDS)
+    expires_at = datetime.now(timezone.utc) + timedelta(seconds=STATE_TTL_SECONDS)
+    supabase = get_supabase_client()
+    supabase.table("oauth_states").insert({
+        "state": state,
+        "telegram_id": telegram_id,
+        "expires_at": expires_at.isoformat(),
+    }).execute()
     logger.info(f"Created OAuth state for telegram_id={telegram_id}")
     return state
 
 
 def validate_state(state: str) -> Optional[int]:
     """Validate and consume an OAuth state token. Returns telegram_id or None."""
-    _cleanup_expired()
-    entry = _states.pop(state, None)
-    if entry is None:
+    supabase = get_supabase_client()
+    result = supabase.table("oauth_states").select("*").eq("state", state).execute()
+    if not result.data:
+        logger.warning(f"State not found: {state}")
         return None
-    telegram_id, expires_at = entry
-    if time.time() > expires_at:
+    row = result.data[0]
+    # Delete it immediately (one-time use)
+    supabase.table("oauth_states").delete().eq("state", state).execute()
+    # Check expiry
+    expires_at = datetime.fromisoformat(row["expires_at"])
+    if datetime.now(timezone.utc) > expires_at:
+        logger.warning(f"State expired for telegram_id={row['telegram_id']}")
         return None
-    return telegram_id
-
-
-def _cleanup_expired():
-    """Remove expired state entries."""
-    now = time.time()
-    expired = [s for s, (_, exp) in _states.items() if now > exp]
-    for s in expired:
-        del _states[s]
+    return row["telegram_id"]
