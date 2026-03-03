@@ -81,7 +81,8 @@ async def connect_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info(f"/connect from user {telegram_id}")
 
     try:
-        state = create_state(telegram_id)
+        whoop_state = create_state(telegram_id)
+        withings_state = create_state(telegram_id)
 
         whoop = WhoopClient()
         whoop_url = whoop.get_auth_url(
@@ -89,9 +90,9 @@ async def connect_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "WHOOP_REDIRECT_URI",
                 "https://worker-production-526b.up.railway.app/auth/whoop/callback",
             ),
-            state,
+            whoop_state,
         )
-        withings_url = withings_auth_url(state)
+        withings_url = withings_auth_url(withings_state)
 
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("Connect Whoop", url=whoop_url)],
@@ -134,11 +135,19 @@ async def stats_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if e.response.status_code == 401:
                     # Token expired — refresh and retry once
                     logger.info(f"Whoop 401 for {telegram_id}, refreshing token...")
-                    from integrations.whoop import refresh_whoop_token
-                    from core.database import store_whoop_tokens
-                    new_tokens = await refresh_whoop_token(whoop_tokens["refresh_token"])
-                    store_whoop_tokens(telegram_id, new_tokens)
-                    recovery_data = await whoop.get_recovery(new_tokens["access_token"])
+                    try:
+                        from integrations.whoop import refresh_whoop_token
+                        from core.database import store_whoop_tokens
+                        new_tokens = await refresh_whoop_token(whoop_tokens["refresh_token"])
+                        store_whoop_tokens(telegram_id, new_tokens)
+                        recovery_data = await whoop.get_recovery(new_tokens["access_token"])
+                    except Exception as refresh_error:
+                        logger.error(f"Token refresh failed for {telegram_id}: {refresh_error}")
+                        await whoop.close()
+                        await update.message.reply_text(
+                            "Your Whoop connection has expired. Please use /connect to reconnect."
+                        )
+                        return
                 else:
                     raise
             await whoop.close()

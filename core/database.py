@@ -172,7 +172,7 @@ def store_whoop_tokens(telegram_id: int, token_data: dict) -> None:
     transport = httpx.HTTPTransport(retries=3)
     with httpx.Client(transport=transport, timeout=15.0) as client:
         response = client.post(
-            f"{supabase_url}/rest/v1/whoop_tokens",
+            f"{supabase_url}/rest/v1/whoop_tokens?on_conflict=telegram_id",
             headers=headers,
             json=payload,
         )
@@ -228,7 +228,7 @@ def store_withings_tokens(telegram_id: int, token_data: dict) -> None:
     transport = httpx.HTTPTransport(retries=3)
     with httpx.Client(transport=transport, timeout=15.0) as client:
         response = client.post(
-            f"{supabase_url}/rest/v1/withings_tokens",
+            f"{supabase_url}/rest/v1/withings_tokens?on_conflict=telegram_id",
             headers=headers,
             json=payload,
         )
