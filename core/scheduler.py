@@ -126,4 +126,10 @@ async def start_scheduler(app):
     scheduler.add_job(refresh_whoop_tokens_job, "interval", minutes=50, id="whoop_token_refresh")
     scheduler.add_job(refresh_withings_tokens_job, "interval", minutes=150, id="withings_token_refresh")
     scheduler.start()
-    logger.info("Scheduler started with morning check-in (7:00 AM), weekly summary (Sunday 6:00 PM), Whoop token refresh (every 50 min), Withings token refresh (every 2.5 hr)")
+    logger.info("Scheduler started — running initial token refresh...")
+
+    # Refresh tokens immediately on startup so they're fresh after redeploy
+    await refresh_whoop_tokens_job()
+    await refresh_withings_tokens_job()
+
+    logger.info("Startup token refresh complete")

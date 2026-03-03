@@ -8,6 +8,7 @@ to the Claude agent for AI coaching responses.
 
 import os
 
+import httpx
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import BadRequest
 from telegram.ext import ContextTypes
@@ -127,7 +128,19 @@ async def stats_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if whoop_tokens and whoop_tokens.get("access_token"):
         try:
             whoop = WhoopClient()
-            recovery_data = await whoop.get_recovery(whoop_tokens["access_token"])
+            try:
+                recovery_data = await whoop.get_recovery(whoop_tokens["access_token"])
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code == 401:
+                    # Token expired — refresh and retry once
+                    logger.info(f"Whoop 401 for {telegram_id}, refreshing token...")
+                    from integrations.whoop import refresh_whoop_token
+                    from core.database import store_whoop_tokens
+                    new_tokens = await refresh_whoop_token(whoop_tokens["refresh_token"])
+                    store_whoop_tokens(telegram_id, new_tokens)
+                    recovery_data = await whoop.get_recovery(new_tokens["access_token"])
+                else:
+                    raise
             await whoop.close()
 
             records = recovery_data.get("records", [])
