@@ -105,7 +105,7 @@ milo-bot/
 
 ## License
 
-This project is licensed under [CC BY-NC 4.0](LICENSE). You can view, fork, and learn from the code — but commercial use is not permitted without permission.
+This project is licensed under [AGPL-3.0](LICENSE). You're free to view, fork, and contribute — but any modified version must also be open sourced under the same license.
 
 ---
 
