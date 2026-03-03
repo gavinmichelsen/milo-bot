@@ -12,6 +12,7 @@ from typing import Optional
 import anthropic
 
 from coaching.prompts import MILO_SYSTEM_PROMPT
+from coaching.security import validate_message
 from utils.logger import setup_logger
 
 logger = setup_logger("milo.agent")
@@ -98,6 +99,14 @@ async def get_coaching_response(user_message: str, user_context: dict) -> str:
     Returns:
         Coaching response string from Claude.
     """
+    telegram_id = user_context.get("telegram_id", 0)
+
+    # Run security checks before hitting the API
+    is_allowed, rejection = validate_message(telegram_id, user_message)
+    if not is_allowed:
+        logger.info(f"Message rejected for user {telegram_id}: {rejection}")
+        return rejection
+
     context_str = build_user_context(user_context)
     full_message = context_str + user_message
 
