@@ -143,30 +143,41 @@ def validate_oauth_state(state: str) -> Optional[int]:
     return _retry_on_dns_error(_query)
 
 
-def store_whoop_tokens(telegram_id: int, token_data: dict) -> dict:
-    """Store or update Whoop OAuth tokens for a user."""
-    def _query():
-        client = get_supabase_client()
-        expires_in = token_data.get("expires_in", 3600)
-        expires_at = (
-            datetime.now(timezone.utc) + timedelta(seconds=expires_in)
-        ).isoformat()
-        row = {
-            "telegram_id": telegram_id,
-            "access_token": token_data.get("access_token"),
-            "refresh_token": token_data.get("refresh_token"),
-            "expires_at": expires_at,
-            "scopes": token_data.get("scope", ""),
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-        }
-        result = (
-            client.table("whoop_tokens")
-            .upsert(row, on_conflict="telegram_id")
-            .execute()
+def store_whoop_tokens(telegram_id: int, token_data: dict) -> None:
+    """Store Whoop OAuth tokens via direct HTTP (bypasses supabase-py DNS issues)."""
+    supabase_url = os.getenv("SUPABASE_URL")
+    supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY")
+
+    expires_in = token_data.get("expires_in", 3600)
+    expires_at = (
+        datetime.now(timezone.utc) + timedelta(seconds=expires_in)
+    ).isoformat()
+
+    headers = {
+        "apikey": supabase_key,
+        "Authorization": f"Bearer {supabase_key}",
+        "Content-Type": "application/json",
+        "Prefer": "resolution=merge-duplicates,return=minimal",
+    }
+
+    payload = {
+        "telegram_id": telegram_id,
+        "access_token": token_data.get("access_token"),
+        "refresh_token": token_data.get("refresh_token"),
+        "expires_at": expires_at,
+        "scopes": token_data.get("scope", ""),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    transport = httpx.HTTPTransport(retries=3)
+    with httpx.Client(transport=transport, timeout=15.0) as client:
+        response = client.post(
+            f"{supabase_url}/rest/v1/whoop_tokens",
+            headers=headers,
+            json=payload,
         )
-        logger.info(f"Stored Whoop tokens for telegram_id={telegram_id}")
-        return result.data[0]
-    return _retry_on_dns_error(_query)
+        response.raise_for_status()
+    logger.info(f"Stored Whoop tokens for telegram_id={telegram_id}")
 
 
 def get_whoop_tokens(telegram_id: int) -> Optional[dict]:
