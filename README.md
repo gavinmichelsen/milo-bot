@@ -4,10 +4,11 @@
 ![Anthropic](https://img.shields.io/badge/Claude_AI-Anthropic-191919?style=flat-square&logo=anthropic&logoColor=white)
 ![Telegram](https://img.shields.io/badge/Telegram-Bot_API-26A5E4?style=flat-square&logo=telegram&logoColor=white)
 ![Supabase](https://img.shields.io/badge/Supabase-PostgreSQL-3FCF8E?style=flat-square&logo=supabase&logoColor=white)
-![Railway](https://img.shields.io/badge/Railway-Deployed-0B0D0E?style=flat-square&logo=railway&logoColor=white)
+![Railway](https://img.shields.io/badge/Railway-Live-0B0D0E?style=flat-square&logo=railway&logoColor=white)
 ![Whoop](https://img.shields.io/badge/Whoop-OAuth_2.0-44D62C?style=flat-square)
 ![Withings](https://img.shields.io/badge/Withings-OAuth_2.0-00B2A9?style=flat-square)
-![GitHub](https://img.shields.io/badge/GitHub-Source-181717?style=flat-square&logo=github&logoColor=white)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow?style=flat-square)](LICENSE)
+![PRs Welcome](https://img.shields.io/badge/PRs-Welcome-brightgreen?style=flat-square)
 
 Milo is an AI health coaching agent that lives inside Telegram. It connects to your Whoop strap and Withings scale, pulls real biometric data, and delivers personalized coaching across training, sleep, nutrition, and lifestyle — all through natural conversation powered by Claude.
 
@@ -190,7 +191,7 @@ Or just send a message. Ask Milo anything about training, nutrition, sleep, or l
 
 ## License
 
-This project is licensed under [AGPL-3.0](LICENSE). You're free to view, fork, and contribute — but any modified version must also be open sourced under the same license.
+This project is licensed under the [MIT License](LICENSE).
 
 ---
 
