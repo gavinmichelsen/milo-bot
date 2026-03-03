@@ -7,6 +7,7 @@ personalized coaching responses.
 """
 
 import os
+from typing import Optional
 
 import anthropic
 
@@ -15,9 +16,20 @@ from utils.logger import setup_logger
 
 logger = setup_logger("milo.agent")
 
-client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+MODEL = "claude-sonnet-4-6"
 
-MODEL = "claude-sonnet-4-20250514"
+# Lazy client — created on first use so the bot can start without an API key
+_client: Optional[anthropic.Anthropic] = None
+
+
+def _get_client() -> anthropic.Anthropic:
+    global _client
+    if _client is None:
+        api_key = os.getenv("ANTHROPIC_API_KEY")
+        if not api_key or api_key == "your-anthropic-api-key":
+            raise RuntimeError("ANTHROPIC_API_KEY not set in .env")
+        _client = anthropic.Anthropic(api_key=api_key)
+    return _client
 
 
 def build_user_context(user_context: dict) -> str:
@@ -92,7 +104,7 @@ async def get_coaching_response(user_message: str, user_context: dict) -> str:
     username = user_context.get("username", "there")
 
     try:
-        response = client.messages.create(
+        response = _get_client().messages.create(
             model=MODEL,
             max_tokens=1024,
             system=MILO_SYSTEM_PROMPT + f"\n\nYou are coaching {username}.",
