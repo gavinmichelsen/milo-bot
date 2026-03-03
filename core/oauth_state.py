@@ -24,7 +24,7 @@ STATE_TTL_SECONDS = 600
 def create_state(telegram_id: int) -> str:
     """Generate a unique OAuth state token for a user."""
     _cleanup_expired()
-    state = secrets.token_urlsafe(32)
+    state = secrets.token_urlsafe(6)[:8]
     _states[state] = (telegram_id, time.time() + STATE_TTL_SECONDS)
     logger.info(f"Created OAuth state for telegram_id={telegram_id}")
     return state
