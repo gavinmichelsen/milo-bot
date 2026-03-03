@@ -18,7 +18,7 @@ logger = setup_logger("milo.whoop")
 
 WHOOP_AUTH_URL = "https://api.prod.whoop.com/oauth/oauth2/auth"
 WHOOP_TOKEN_URL = "https://api.prod.whoop.com/oauth/oauth2/token"
-WHOOP_API_BASE = "https://api.prod.whoop.com/developer/v1"
+WHOOP_API_BASE = "https://api.prod.whoop.com/developer/v2"
 
 
 class WhoopClient:
@@ -77,14 +77,7 @@ class WhoopClient:
         return response.json()
 
     async def get_recovery(self, access_token: str) -> dict:
-        """Fetch the latest recovery data for a user.
-
-        Args:
-            access_token: Valid Whoop access token.
-
-        Returns:
-            Recovery data including HRV, resting heart rate, and recovery score.
-        """
+        """Fetch the latest recovery data from the v2 API."""
         response = await self.http.get(
             f"{WHOOP_API_BASE}/recovery",
             headers={"Authorization": f"Bearer {access_token}"},
@@ -94,14 +87,7 @@ class WhoopClient:
         return response.json()
 
     async def get_sleep(self, access_token: str) -> dict:
-        """Fetch the latest sleep data for a user.
-
-        Args:
-            access_token: Valid Whoop access token.
-
-        Returns:
-            Sleep data including duration, efficiency, and sleep stages.
-        """
+        """Fetch the latest sleep data from the v2 API."""
         response = await self.http.get(
             f"{WHOOP_API_BASE}/activity/sleep",
             headers={"Authorization": f"Bearer {access_token}"},
