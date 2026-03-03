@@ -7,6 +7,7 @@ to the Claude agent for AI coaching responses.
 """
 
 from telegram import Update
+from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
 from agent import get_coaching_response
@@ -134,4 +135,9 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     }
 
     response = await get_coaching_response(user_message, user_context)
-    await update.message.reply_text(response, parse_mode="Markdown")
+
+    # Try Markdown first, fall back to plain text if Telegram rejects the formatting
+    try:
+        await update.message.reply_text(response, parse_mode="Markdown")
+    except BadRequest:
+        await update.message.reply_text(response)
