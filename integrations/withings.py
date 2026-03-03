@@ -162,7 +162,7 @@ async def get_latest_measurements(access_token: str) -> dict:
         for m in latest:
             value = m["value"] * (10 ** m["unit"])
             if m["type"] == 1:
-                result["weight_kg"] = round(value, 1)
+                result["weight_lbs"] = round(value * 2.20462, 1)
             elif m["type"] == 6:
                 result["fat_ratio"] = round(value, 1)
             elif m["type"] == 8:

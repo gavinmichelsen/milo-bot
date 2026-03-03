@@ -13,15 +13,10 @@ from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
 from agent import get_coaching_response
-from core.database import upsert_user, get_whoop_tokens
+from core.database import upsert_user, get_whoop_tokens, get_withings_tokens
 from core.oauth_state import create_state
 from integrations.whoop import WhoopClient
 from utils.logger import setup_logger
-
-WHOOP_REDIRECT_URI = os.getenv(
-    "WHOOP_REDIRECT_URI",
-    "https://worker-production-526b.up.railway.app/auth/whoop/callback",
-)
 
 logger = setup_logger("milo.handlers")
 
@@ -77,25 +72,33 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def connect_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle the /connect command — generate Whoop OAuth link."""
+    """Handle the /connect command — show buttons for Whoop and Withings."""
+    from integrations.whoop import WhoopClient
+    from integrations.withings import get_auth_url as withings_auth_url
+
     telegram_id = update.effective_user.id
     logger.info(f"/connect from user {telegram_id}")
 
     try:
-        # Generate in-memory OAuth state (no database dependency)
         state = create_state(telegram_id)
 
         whoop = WhoopClient()
-        auth_url = whoop.get_auth_url(WHOOP_REDIRECT_URI, state)
+        whoop_url = whoop.get_auth_url(
+            os.getenv(
+                "WHOOP_REDIRECT_URI",
+                "https://worker-production-526b.up.railway.app/auth/whoop/callback",
+            ),
+            state,
+        )
+        withings_url = withings_auth_url(state)
 
         keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("Connect Whoop", url=auth_url)]
+            [InlineKeyboardButton("Connect Whoop", url=whoop_url)],
+            [InlineKeyboardButton("Connect Withings", url=withings_url)],
         ])
 
         await update.message.reply_text(
-            "Tap the button below to connect your Whoop account.\n\n"
-            "You'll be redirected to Whoop to authorize access to your "
-            "recovery, sleep, and workout data.",
+            "Connect your health devices to Milo:",
             reply_markup=keyboard,
         )
     except Exception as e:
@@ -105,110 +108,74 @@ async def connect_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
-async def connect_withings_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle the /connectwithings command — generate Withings OAuth link."""
-    from integrations.withings import get_auth_url
-    telegram_id = update.effective_user.id
-    logger.info(f"/connectwithings from user {telegram_id}")
-
-    try:
-        state = create_state(telegram_id)
-        url = get_auth_url(state)
-
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("Connect Withings", url=url)]
-        ])
-
-        await update.message.reply_text(
-            "Tap the button below to connect your Withings scale.\n\n"
-            "You'll be redirected to Withings to authorize access to your "
-            "weight and body composition data.",
-            reply_markup=keyboard,
-        )
-    except Exception as e:
-        logger.error(f"/connectwithings failed for {telegram_id}: {e}")
-        await update.message.reply_text(
-            "Something went wrong. Please try /connectwithings again in a moment."
-        )
-
-
 async def stats_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle the /stats command — fetch and display latest Whoop recovery data."""
+    """Handle the /stats command — fetch and display Whoop + Withings data."""
+    from integrations.withings import get_latest_measurements
+
     telegram_id = update.effective_user.id
     logger.info(f"/stats from user {telegram_id}")
 
-    # Get stored Whoop tokens
+    lines = []
+
+    # --- Whoop recovery data ---
     try:
-        tokens = get_whoop_tokens(telegram_id)
+        whoop_tokens = get_whoop_tokens(telegram_id)
     except Exception as e:
         logger.error(f"Failed to fetch Whoop tokens for {telegram_id}: {e}")
-        await update.message.reply_text(
-            "Couldn't fetch your stats right now. Try again in a moment."
-        )
-        return
+        whoop_tokens = None
 
-    if not tokens:
-        await update.message.reply_text(
-            "You haven't connected Whoop yet. Use /connect to get started."
-        )
-        return
+    if whoop_tokens and whoop_tokens.get("access_token"):
+        try:
+            whoop = WhoopClient()
+            recovery_data = await whoop.get_recovery(whoop_tokens["access_token"])
+            await whoop.close()
 
-    access_token = tokens.get("access_token")
-    if not access_token:
-        await update.message.reply_text(
-            "Your Whoop connection seems broken. Use /connect to reconnect."
-        )
-        return
+            records = recovery_data.get("records", [])
+            if records:
+                score = records[0].get("score", {})
+                recovery_score = score.get("recovery_score")
+                hrv = score.get("hrv_rmssd_milli")
+                resting_hr = score.get("resting_heart_rate")
 
-    # Fetch latest recovery from Whoop API
+                if recovery_score is not None:
+                    lines.append(f"\U0001f7e2 Recovery Score: {recovery_score:.0f}%")
+                if hrv is not None:
+                    lines.append(f"\u2764\ufe0f HRV: {hrv:.0f}ms")
+                if resting_hr is not None:
+                    lines.append(f"\U0001f4a4 Resting HR: {resting_hr:.0f}bpm")
+        except Exception as e:
+            logger.error(f"Whoop API call failed for {telegram_id}: {e}")
+
+    # --- Withings body data ---
     try:
-        whoop = WhoopClient()
-        recovery_data = await whoop.get_recovery(access_token)
-        await whoop.close()
+        withings_tokens = get_withings_tokens(telegram_id)
     except Exception as e:
-        logger.error(f"Whoop API call failed for {telegram_id}: {e}")
+        logger.error(f"Failed to fetch Withings tokens for {telegram_id}: {e}")
+        withings_tokens = None
+
+    if withings_tokens and withings_tokens.get("access_token"):
+        try:
+            measurements = await get_latest_measurements(withings_tokens["access_token"])
+            weight = measurements.get("weight_lbs")
+            fat = measurements.get("fat_ratio")
+
+            if weight is not None:
+                lines.append(f"\u2696\ufe0f Weight: {weight} lbs")
+            if fat is not None:
+                lines.append(f"\U0001f4ca Body Fat: {fat}%")
+        except Exception as e:
+            logger.error(f"Withings API call failed for {telegram_id}: {e}")
+
+    # --- Send response ---
+    if lines:
+        await update.message.reply_text("\n".join(lines))
+    elif not whoop_tokens and not withings_tokens:
         await update.message.reply_text(
-            "Couldn't fetch your stats right now. Try again in a moment."
+            "You haven't connected any devices yet. Use /connect to get started."
         )
-        return
-
-    # Parse the recovery response
-    try:
-        records = recovery_data.get("records", [])
-        if not records:
-            await update.message.reply_text(
-                "No recovery data available yet. "
-                "Make sure you wore your Whoop to sleep last night."
-            )
-            return
-
-        latest = records[0]
-        score = latest.get("score", {})
-        recovery_score = score.get("recovery_score")
-        hrv = score.get("hrv_rmssd_milli")
-        resting_hr = score.get("resting_heart_rate")
-        sleep_perf = score.get("sleep_performance_percentage")
-
-        lines = []
-        if recovery_score is not None:
-            lines.append(f"\U0001f7e2 Recovery Score: {recovery_score:.0f}%")
-        if hrv is not None:
-            lines.append(f"\u2764\ufe0f HRV: {hrv:.0f}ms")
-        if resting_hr is not None:
-            lines.append(f"\U0001f4a4 Resting HR: {resting_hr:.0f}bpm")
-        if sleep_perf is not None:
-            lines.append(f"\U0001f634 Sleep Performance: {sleep_perf:.0f}%")
-
-        if lines:
-            await update.message.reply_text("\n".join(lines))
-        else:
-            await update.message.reply_text(
-                "Recovery data came back empty. Try again later."
-            )
-    except Exception as e:
-        logger.error(f"Failed to parse Whoop recovery for {telegram_id}: {e}")
+    else:
         await update.message.reply_text(
-            "Couldn't fetch your stats right now. Try again in a moment."
+            "No data available yet. Make sure you're wearing your devices."
         )
 
 
