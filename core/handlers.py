@@ -87,8 +87,9 @@ async def connect_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(
                 "Your Whoop is already connected!\n\n"
                 "Use /stats to see your latest data. "
-                "To reconnect, tap the button below.",
+                "To reconnect, use /connect again later.",
             )
+            return
     except Exception as e:
         logger.error(f"Failed to check Whoop tokens for {telegram_id}: {e}")
 

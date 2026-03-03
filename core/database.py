@@ -12,22 +12,18 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import httpx
-from supabase import create_client, Client
+from supabase import create_client
 
 from utils.logger import setup_logger
 
 logger = setup_logger("milo.database")
 
 # Singleton client — initialized once when the module is first imported
-_client: Optional[Client] = None
+_client = None
 
 
-def get_supabase_client() -> Client:
-    """Return the Supabase client, creating it on first call.
-
-    Returns:
-        Authenticated Supabase client.
-    """
+def get_supabase_client():
+    """Return the Supabase client, creating it on first call."""
     global _client
     if _client is None:
         url = os.getenv("SUPABASE_URL")
@@ -47,20 +43,20 @@ def _reset_client():
     logger.info("Supabase client reset — will reconnect on next call")
 
 
-def _retry_on_dns_error(func, *args, max_retries: int = 3, **kwargs):
-    """Retry a Supabase operation if DNS resolution fails.
+def _retry_on_dns_error(func, max_retries: int = 3):
+    """Retry a Supabase operation if DNS resolution or connection fails.
 
     Railway containers can experience transient DNS failures.
-    This wrapper retries with exponential backoff and resets
-    the Supabase client between attempts.
+    This wrapper retries with backoff and resets the client between attempts.
     """
     for attempt in range(max_retries):
         try:
-            return func(*args, **kwargs)
-        except httpx.ConnectError as e:
-            if "Name or service not known" in str(e) or "Errno -2" in str(e):
+            return func()
+        except (httpx.ConnectError, httpx.ConnectTimeout) as e:
+            err_str = str(e)
+            if "Name or service not known" in err_str or "Errno -2" in err_str or isinstance(e, httpx.ConnectTimeout):
                 logger.warning(
-                    f"DNS resolution failed (attempt {attempt + 1}/{max_retries}): {e}"
+                    f"Connection failed (attempt {attempt + 1}/{max_retries}): {e}"
                 )
                 _reset_client()
                 if attempt < max_retries - 1:
@@ -188,52 +184,37 @@ def get_whoop_tokens(telegram_id: int) -> Optional[dict]:
     return _retry_on_dns_error(_query)
 
 
-async def log_workout(telegram_id: int, exercise: str, sets: int, reps: int, weight: float) -> dict:
-    """Log a workout entry for a user.
-
-    Args:
-        telegram_id: The user's Telegram user ID.
-        exercise: Name of the exercise (e.g. 'bench press').
-        sets: Number of sets performed.
-        reps: Number of reps per set.
-        weight: Weight used in the exercise.
-
-    Returns:
-        The created workout log record.
-    """
-    client = get_supabase_client()
-    result = (
-        client.table("workouts")
-        .insert({
-            "telegram_id": telegram_id,
-            "exercise": exercise,
-            "sets": sets,
-            "reps": reps,
-            "weight": weight,
-        })
-        .execute()
-    )
-    logger.info(f"Logged workout for {telegram_id}: {exercise} {sets}x{reps} @ {weight}")
-    return result.data[0]
+def log_workout(telegram_id: int, exercise: str, sets: int, reps: int, weight: float) -> dict:
+    """Log a workout entry for a user."""
+    def _query():
+        client = get_supabase_client()
+        result = (
+            client.table("workouts")
+            .insert({
+                "telegram_id": telegram_id,
+                "exercise": exercise,
+                "sets": sets,
+                "reps": reps,
+                "weight": weight,
+            })
+            .execute()
+        )
+        logger.info(f"Logged workout for {telegram_id}: {exercise} {sets}x{reps} @ {weight}")
+        return result.data[0]
+    return _retry_on_dns_error(_query)
 
 
-async def get_workout_history(telegram_id: int, limit: int = 10) -> list:
-    """Fetch recent workout history for a user.
-
-    Args:
-        telegram_id: The user's Telegram user ID.
-        limit: Maximum number of records to return.
-
-    Returns:
-        List of workout log records, most recent first.
-    """
-    client = get_supabase_client()
-    result = (
-        client.table("workouts")
-        .select("*")
-        .eq("telegram_id", telegram_id)
-        .order("created_at", desc=True)
-        .limit(limit)
-        .execute()
-    )
-    return result.data
+def get_workout_history(telegram_id: int, limit: int = 10) -> list:
+    """Fetch recent workout history for a user."""
+    def _query():
+        client = get_supabase_client()
+        result = (
+            client.table("workouts")
+            .select("*")
+            .eq("telegram_id", telegram_id)
+            .order("created_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        return result.data
+    return _retry_on_dns_error(_query)
