@@ -10,6 +10,7 @@ Whoop API docs: https://developer.whoop.com/
 import os
 from urllib.parse import urlencode
 
+import aiohttp
 import httpx
 
 from utils.logger import setup_logger
@@ -99,3 +100,20 @@ class WhoopClient:
     async def close(self):
         """Close the underlying HTTP client."""
         await self.http.aclose()
+
+
+async def refresh_whoop_token(refresh_token: str) -> dict:
+    """Exchange a refresh token for a new access + refresh token pair."""
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            WHOOP_TOKEN_URL,
+            data={
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
+                "client_id": os.getenv("WHOOP_CLIENT_ID"),
+                "client_secret": os.getenv("WHOOP_CLIENT_SECRET"),
+                "scope": "offline",
+            },
+        ) as resp:
+            resp.raise_for_status()
+            return await resp.json()

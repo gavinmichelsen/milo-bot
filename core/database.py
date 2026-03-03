@@ -196,6 +196,15 @@ def get_whoop_tokens(telegram_id: int) -> Optional[dict]:
     return _retry_on_dns_error(_query)
 
 
+def get_all_whoop_tokens() -> list:
+    """Return all rows from whoop_tokens table."""
+    def _query():
+        client = get_supabase_client()
+        result = client.table("whoop_tokens").select("*").execute()
+        return result.data or []
+    return _retry_on_dns_error(_query)
+
+
 def log_workout(telegram_id: int, exercise: str, sets: int, reps: int, weight: float) -> dict:
     """Log a workout entry for a user."""
     def _query():
