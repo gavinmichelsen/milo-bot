@@ -1,3 +1,12 @@
+# Force reliable DNS resolution — Railway's internal DNS can fail on external hostnames
+import os
+os.makedirs("/etc/", exist_ok=True)
+try:
+    with open("/etc/resolv.conf", "w") as f:
+        f.write("nameserver 8.8.8.8\nnameserver 8.8.4.4\n")
+except Exception:
+    pass  # May not have write access — will try next approach
+
 """
 Milo Bot — AI Physique and Health Coach for Telegram.
 
@@ -10,7 +19,6 @@ legendary strength through progressive overload.
 """
 
 import asyncio
-import os
 import signal
 
 from aiohttp import web
