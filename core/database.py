@@ -56,16 +56,18 @@ def get_user(telegram_id: int) -> Optional[dict]:
     return None
 
 
-def upsert_user(telegram_id: int, username: Optional[str], first_name: Optional[str]) -> dict:
+def upsert_user(telegram_id: int, username: Optional[str], first_name: Optional[str], last_name: Optional[str]) -> dict:
     """Create or update a user profile.
 
     Uses telegram_id as the conflict key — if the user already exists
-    their username and first_name are updated, otherwise a new row is created.
+    their username, first_name, and last_name are updated, otherwise
+    a new row is created.
 
     Args:
         telegram_id: The user's Telegram user ID.
         username: The user's Telegram @username (may be None).
         first_name: The user's Telegram first name (may be None).
+        last_name: The user's Telegram last name (may be None).
 
     Returns:
         The upserted user record.
@@ -75,6 +77,7 @@ def upsert_user(telegram_id: int, username: Optional[str], first_name: Optional[
         "telegram_id": telegram_id,
         "username": username,
         "first_name": first_name,
+        "last_name": last_name,
     }
     result = (
         client.table("users")
