@@ -147,13 +147,14 @@ def store_whoop_tokens(telegram_id: int, token_data: dict) -> dict:
     """Store or update Whoop OAuth tokens for a user."""
     def _query():
         client = get_supabase_client()
+        expires_in = token_data.get("expires_in", 3600)
         expires_at = (
-            datetime.now(timezone.utc) + timedelta(seconds=token_data["expires_in"])
+            datetime.now(timezone.utc) + timedelta(seconds=expires_in)
         ).isoformat()
         row = {
             "telegram_id": telegram_id,
-            "access_token": token_data["access_token"],
-            "refresh_token": token_data["refresh_token"],
+            "access_token": token_data.get("access_token"),
+            "refresh_token": token_data.get("refresh_token"),
             "expires_at": expires_at,
             "scopes": token_data.get("scope", ""),
             "updated_at": datetime.now(timezone.utc).isoformat(),

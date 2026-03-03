@@ -47,7 +47,7 @@ class WhoopClient:
             "client_id": self.client_id,
             "redirect_uri": redirect_uri,
             "response_type": "code",
-            "scope": "read:recovery read:sleep read:workout read:body_measurement",
+            "scope": "read:recovery read:sleep read:workout read:body_measurement offline",
             "state": state,
         }
         return f"{WHOOP_AUTH_URL}?{urlencode(params)}"
