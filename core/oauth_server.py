@@ -168,10 +168,15 @@ async def health(request):
     return web.Response(text="ok")
 
 
+async def withings_callback_placeholder(request):
+    return web.Response(text="ok", status=200)
+
+
 def create_web_app():
     """Create and configure the aiohttp web application."""
     app = web.Application()
     app.router.add_get("/auth/whoop/callback", whoop_callback)
+    app.router.add_get("/auth/withings/callback", withings_callback_placeholder)
     app.router.add_get("/health", health)
     app.router.add_get("/debug/dns", debug_dns)
     return app
