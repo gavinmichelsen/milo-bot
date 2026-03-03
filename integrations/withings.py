@@ -153,7 +153,10 @@ async def get_latest_measurements(access_token: str) -> dict:
         if data.get("status") != 0:
             raise Exception(f"Withings measure error: {data}")
 
+        logger.info(f"Withings raw response: {data}")
         measuregrps = data["body"].get("measuregrps", [])
+        logger.info(f"Withings measuregrps: {measuregrps}")
+        logger.info(f"Withings latest group: {measuregrps[0] if measuregrps else 'empty'}")
         if not measuregrps:
             return {}
 
