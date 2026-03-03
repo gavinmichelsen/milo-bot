@@ -6,6 +6,7 @@ workout logs, connected device tokens, and coaching history.
 """
 
 import os
+from typing import Optional
 
 from supabase import create_client, Client
 
@@ -13,19 +14,28 @@ from utils.logger import setup_logger
 
 logger = setup_logger("milo.database")
 
+# Singleton client — initialized once when the module is first imported
+_client: Optional[Client] = None
+
 
 def get_supabase_client() -> Client:
-    """Create and return a Supabase client instance.
+    """Return the Supabase client, creating it on first call.
 
     Returns:
         Authenticated Supabase client.
     """
-    url = os.getenv("SUPABASE_URL")
-    key = os.getenv("SUPABASE_KEY")
-    return create_client(url, key)
+    global _client
+    if _client is None:
+        url = os.getenv("SUPABASE_URL")
+        key = os.getenv("SUPABASE_KEY")
+        if not url or not key:
+            raise RuntimeError("SUPABASE_URL and SUPABASE_KEY must be set in .env")
+        _client = create_client(url, key)
+        logger.info("Supabase client initialized")
+    return _client
 
 
-async def get_user(telegram_id: int) -> dict | None:
+def get_user(telegram_id: int) -> Optional[dict]:
     """Fetch a user profile by their Telegram ID.
 
     Args:
@@ -46,23 +56,32 @@ async def get_user(telegram_id: int) -> dict | None:
     return None
 
 
-async def upsert_user(telegram_id: int, username: str) -> dict:
+def upsert_user(telegram_id: int, username: Optional[str], first_name: Optional[str]) -> dict:
     """Create or update a user profile.
+
+    Uses telegram_id as the conflict key — if the user already exists
+    their username and first_name are updated, otherwise a new row is created.
 
     Args:
         telegram_id: The user's Telegram user ID.
-        username: The user's Telegram username.
+        username: The user's Telegram @username (may be None).
+        first_name: The user's Telegram first name (may be None).
 
     Returns:
         The upserted user record.
     """
     client = get_supabase_client()
+    row = {
+        "telegram_id": telegram_id,
+        "username": username,
+        "first_name": first_name,
+    }
     result = (
         client.table("users")
-        .upsert({"telegram_id": telegram_id, "username": username})
+        .upsert(row, on_conflict="telegram_id")
         .execute()
     )
-    logger.info(f"Upserted user: {telegram_id}")
+    logger.info(f"Upserted user: {telegram_id} (@{username})")
     return result.data[0]
 
 

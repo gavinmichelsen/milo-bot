@@ -10,6 +10,7 @@ from telegram import Update
 from telegram.ext import ContextTypes
 
 from agent import get_coaching_response
+from core.database import upsert_user
 from utils.logger import setup_logger
 
 logger = setup_logger("milo.handlers")
@@ -47,8 +48,20 @@ You can also just *send me a message* and I'll coach you on training, nutrition,
 
 
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle the /start command with a welcome message."""
-    logger.info(f"/start from user {update.effective_user.id}")
+    """Handle the /start command — save the user to Supabase and send welcome message."""
+    user = update.effective_user
+    logger.info(f"/start from user {user.id}")
+
+    # Save or update the user in Supabase
+    try:
+        upsert_user(
+            telegram_id=user.id,
+            username=user.username,
+            first_name=user.first_name,
+        )
+    except Exception as e:
+        logger.error(f"Failed to save user {user.id} to Supabase: {e}")
+
     await update.message.reply_text(WELCOME_MESSAGE, parse_mode="Markdown")
 
 
