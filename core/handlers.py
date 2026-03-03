@@ -1,0 +1,123 @@
+"""
+Telegram command handlers for Milo bot.
+
+Each handler corresponds to a bot command (/start, /help, etc.)
+and is registered in bot.py. Conversational messages are routed
+to the Claude agent for AI coaching responses.
+"""
+
+from telegram import Update
+from telegram.ext import ContextTypes
+
+from agent import get_coaching_response
+from utils.logger import setup_logger
+
+logger = setup_logger("milo.handlers")
+
+# --- Welcome message inspired by Milo of Croton ---
+WELCOME_MESSAGE = """
+Welcome to *Milo* — your AI physique and health coach.
+
+_In ancient Greece, Milo of Croton built legendary strength by carrying a calf on his shoulders every single day. As the calf grew into a bull, so did Milo's strength. This is the principle of progressive overload — small, consistent effort that compounds into extraordinary results._
+
+That's exactly how I coach. I help you build your best physique and optimize your health through:
+
+- *Resistance Training* — progressive overload, program design, and load management
+- *Sleep* — recovery optimization using your Whoop data
+- *Nutrition* — body composition focused eating, protein targets, and meal timing
+- *Lifestyle* — stress management, HRV trends, and daily habits
+
+Connect your *Whoop* and *Withings* devices so I can coach you with real data. Every recommendation I make is backed by your numbers.
+
+Type /connect to link your devices, or just start chatting — I'm here to coach you.
+"""
+
+HELP_MESSAGE = """
+*Milo Commands*
+
+/start — Meet Milo and get started
+/connect — Connect Whoop and Withings devices
+/stats — View your latest health and body metrics
+/progress — See your progress over time
+/log — Log a workout (e.g. `bench press 3x5 185lbs`)
+/help — Show this help message
+
+You can also just *send me a message* and I'll coach you on training, nutrition, sleep, or lifestyle.
+"""
+
+
+async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle the /start command with a welcome message."""
+    logger.info(f"/start from user {update.effective_user.id}")
+    await update.message.reply_text(WELCOME_MESSAGE, parse_mode="Markdown")
+
+
+async def connect_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle the /connect command for device integration."""
+    logger.info(f"/connect from user {update.effective_user.id}")
+    await update.message.reply_text(
+        "Whoop and Withings integration is coming soon.\n\n"
+        "Once connected, I'll use your recovery scores, sleep data, "
+        "and body composition metrics to personalize every recommendation.",
+        parse_mode="Markdown",
+    )
+
+
+async def stats_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle the /stats command to show latest metrics."""
+    logger.info(f"/stats from user {update.effective_user.id}")
+    await update.message.reply_text(
+        "Stats dashboard coming soon.\n\n"
+        "This will show your latest Whoop recovery, HRV, resting heart rate, "
+        "Withings weight, body fat %, and recent training volume.",
+        parse_mode="Markdown",
+    )
+
+
+async def progress_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle the /progress command to show trends over time."""
+    logger.info(f"/progress from user {update.effective_user.id}")
+    await update.message.reply_text(
+        "Progress tracking coming soon.\n\n"
+        "This will show your trends over time — strength PRs, "
+        "body composition changes, sleep improvements, and recovery patterns.",
+        parse_mode="Markdown",
+    )
+
+
+async def log_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle the /log command to record a workout."""
+    logger.info(f"/log from user {update.effective_user.id}")
+    await update.message.reply_text(
+        "To log a workout, send a message like:\n\n"
+        "`/log bench press 3x5 185lbs`\n"
+        "`/log squat 5x5 225lbs`\n"
+        "`/log deadlift 1x5 315lbs`\n\n"
+        "I'll track your lifts and monitor your progressive overload over time.",
+        parse_mode="Markdown",
+    )
+
+
+async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle the /help command with a list of all commands."""
+    logger.info(f"/help from user {update.effective_user.id}")
+    await update.message.reply_text(HELP_MESSAGE, parse_mode="Markdown")
+
+
+async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle free-form text messages by routing them to the Claude agent."""
+    user = update.effective_user
+    user_message = update.message.text
+    logger.info(f"Message from {user.id}: {user_message[:50]}...")
+
+    # Build user context for the coaching agent
+    user_context = {
+        "telegram_id": user.id,
+        "username": user.username or user.first_name,
+        "whoop_data": None,     # TODO: Fetch from Supabase
+        "withings_data": None,  # TODO: Fetch from Supabase
+        "workout_history": [],  # TODO: Fetch from Supabase
+    }
+
+    response = await get_coaching_response(user_message, user_context)
+    await update.message.reply_text(response, parse_mode="Markdown")

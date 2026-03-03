@@ -1,0 +1,115 @@
+"""
+Whoop API integration for Milo bot.
+
+Handles OAuth 2.0 authentication and fetching recovery, strain,
+and sleep data from the Whoop platform.
+
+Whoop API docs: https://developer.whoop.com/
+"""
+
+import os
+
+import httpx
+
+from utils.logger import setup_logger
+
+logger = setup_logger("milo.whoop")
+
+WHOOP_AUTH_URL = "https://api.prod.whoop.com/oauth/oauth2/auth"
+WHOOP_TOKEN_URL = "https://api.prod.whoop.com/oauth/oauth2/token"
+WHOOP_API_BASE = "https://api.prod.whoop.com/developer/v1"
+
+
+class WhoopClient:
+    """Client for interacting with the Whoop API.
+
+    Manages OAuth tokens and provides methods to fetch
+    recovery, sleep, and strain data for a user.
+    """
+
+    def __init__(self):
+        self.client_id = os.getenv("WHOOP_CLIENT_ID")
+        self.client_secret = os.getenv("WHOOP_CLIENT_SECRET")
+        self.http = httpx.AsyncClient()
+
+    def get_auth_url(self, redirect_uri: str, state: str) -> str:
+        """Generate the OAuth authorization URL for a user to connect Whoop.
+
+        Args:
+            redirect_uri: Callback URL after authorization.
+            state: Unique state parameter to prevent CSRF.
+
+        Returns:
+            Full authorization URL to redirect the user to.
+        """
+        params = {
+            "client_id": self.client_id,
+            "redirect_uri": redirect_uri,
+            "response_type": "code",
+            "scope": "read:recovery read:sleep read:workout read:body_measurement",
+            "state": state,
+        }
+        query = "&".join(f"{k}={v}" for k, v in params.items())
+        return f"{WHOOP_AUTH_URL}?{query}"
+
+    async def exchange_token(self, code: str, redirect_uri: str) -> dict:
+        """Exchange an authorization code for access and refresh tokens.
+
+        Args:
+            code: Authorization code from the OAuth callback.
+            redirect_uri: The same redirect URI used in the auth request.
+
+        Returns:
+            Token response dict with access_token, refresh_token, etc.
+        """
+        response = await self.http.post(
+            WHOOP_TOKEN_URL,
+            data={
+                "grant_type": "authorization_code",
+                "code": code,
+                "redirect_uri": redirect_uri,
+                "client_id": self.client_id,
+                "client_secret": self.client_secret,
+            },
+        )
+        response.raise_for_status()
+        logger.info("Successfully exchanged Whoop OAuth token")
+        return response.json()
+
+    async def get_recovery(self, access_token: str) -> dict:
+        """Fetch the latest recovery data for a user.
+
+        Args:
+            access_token: Valid Whoop access token.
+
+        Returns:
+            Recovery data including HRV, resting heart rate, and recovery score.
+        """
+        response = await self.http.get(
+            f"{WHOOP_API_BASE}/recovery",
+            headers={"Authorization": f"Bearer {access_token}"},
+            params={"limit": 1},
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def get_sleep(self, access_token: str) -> dict:
+        """Fetch the latest sleep data for a user.
+
+        Args:
+            access_token: Valid Whoop access token.
+
+        Returns:
+            Sleep data including duration, efficiency, and sleep stages.
+        """
+        response = await self.http.get(
+            f"{WHOOP_API_BASE}/activity/sleep",
+            headers={"Authorization": f"Bearer {access_token}"},
+            params={"limit": 1},
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def close(self):
+        """Close the underlying HTTP client."""
+        await self.http.aclose()
