@@ -153,21 +153,23 @@ async def get_latest_measurements(access_token: str) -> dict:
         if data.get("status") != 0:
             raise Exception(f"Withings measure error: {data}")
 
-        logger.info(f"Withings raw response: {data}")
         measuregrps = data["body"].get("measuregrps", [])
-        logger.info(f"Withings measuregrps: {measuregrps}")
-        logger.info(f"Withings latest group: {measuregrps[0] if measuregrps else 'empty'}")
         if not measuregrps:
             return {}
 
-        latest = measuregrps[0]["measures"]
+        # Sort newest first — API returns oldest first
+        sorted_grps = sorted(measuregrps, key=lambda g: g["date"], reverse=True)
+
         result = {}
-        for m in latest:
-            value = m["value"] * (10 ** m["unit"])
-            if m["type"] == 1:
-                result["weight_lbs"] = round(value * 2.20462, 1)
-            elif m["type"] == 6:
-                result["fat_ratio"] = round(value, 1)
-            elif m["type"] == 8:
-                result["fat_mass_kg"] = round(value, 1)
+        for grp in sorted_grps:
+            for m in grp["measures"]:
+                if m["type"] == 1 and "weight_lbs" not in result:
+                    weight_kg = m["value"] * (10 ** m["unit"])
+                    result["weight_lbs"] = round(weight_kg * 2.20462, 1)
+                if m["type"] == 6 and "fat_ratio" not in result:
+                    fat = m["value"] * (10 ** m["unit"])
+                    result["fat_ratio"] = round(fat, 1)
+            if "weight_lbs" in result and "fat_ratio" in result:
+                break
+
         return result
