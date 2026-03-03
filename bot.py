@@ -52,8 +52,8 @@ def main():
     # Conversational handler — routes all other text to the Claude agent
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
 
-    # Start scheduled jobs (morning check-ins, weekly summaries)
-    start_scheduler()
+    # Start scheduled jobs once the event loop is running
+    app.post_init = start_scheduler
 
     logger.info("Milo is live. Polling for messages...")
     app.run_polling()

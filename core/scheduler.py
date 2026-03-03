@@ -42,8 +42,12 @@ async def weekly_progress_summary():
     # TODO: Send messages via Telegram bot
 
 
-def start_scheduler():
-    """Register all scheduled jobs and start the scheduler."""
+async def start_scheduler(app):
+    """Register all scheduled jobs and start the scheduler.
+
+    Called as a post_init callback by python-telegram-bot,
+    which guarantees the async event loop is already running.
+    """
     scheduler.add_job(morning_checkin, "cron", hour=7, minute=0, id="morning_checkin")
     scheduler.add_job(weekly_progress_summary, "cron", day_of_week="sun", hour=18, minute=0, id="weekly_summary")
     scheduler.start()
