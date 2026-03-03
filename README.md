@@ -1,10 +1,10 @@
 # Milo — AI Physique & Health Coach
 
-**Milo** is an AI-powered Telegram bot that coaches users to build their best physique and optimize their health through data-driven, progressive overload principles.
+**Milo** is an AI-powered Telegram bot I built to coach users toward their best physique and optimal health through data-driven, progressive overload principles.
 
 Named after **Milo of Croton**, the ancient Greek wrestler who built legendary strength by carrying a calf on his shoulders every single day. As the calf grew into a bull, so did Milo's strength. This is the principle of **progressive overload** — small, consistent effort that compounds into extraordinary results.
 
-Milo connects to your **Whoop** and **Withings** devices, pulls your real health data, and delivers personalized coaching powered by **Claude AI** across four pillars.
+Milo connects to **Whoop** and **Withings** devices, pulls real health data, and delivers personalized AI coaching across four pillars.
 
 ## Features
 
@@ -22,13 +22,13 @@ Milo connects to your **Whoop** and **Withings** devices, pulls your real health
 
 ### AI Coaching
 
-- Conversational coaching powered by Claude — ask Milo anything about training, nutrition, sleep, or lifestyle
-- Every recommendation is backed by your real Whoop and Withings data when available
-- Context-aware responses that consider your recovery status, body composition trends, and workout history
+- Conversational coaching powered by AI — ask Milo anything about training, nutrition, sleep, or lifestyle
+- Every recommendation is backed by real Whoop and Withings data when available
+- Context-aware responses that consider recovery status, body composition trends, and workout history
 
 ### Proactive Check-ins
 
-- Daily morning check-ins with training recommendations based on your Whoop recovery
+- Daily morning check-ins with training recommendations based on Whoop recovery
 - Weekly progress summaries with body composition trends, training volume, and sleep averages
 
 ## Tech Stack
@@ -36,46 +36,12 @@ Milo connects to your **Whoop** and **Withings** devices, pulls your real health
 | Component | Technology |
 |-----------|-----------|
 | Language | Python 3.11+ |
-| AI Engine | Claude API (Anthropic) |
+| AI | Anthropic API |
 | Telegram | python-telegram-bot |
 | Database | Supabase (PostgreSQL) |
 | Scheduling | APScheduler |
 | HTTP Client | httpx |
 | Deployment | Railway |
-
-## Getting Started
-
-### Prerequisites
-
-- Python 3.11+
-- A Telegram bot token from [@BotFather](https://t.me/BotFather)
-- An Anthropic API key
-- A Supabase project
-
-### Installation
-
-```bash
-# Clone the repository
-git clone https://github.com/gavinmichelsen/milo-bot.git
-cd milo-bot
-
-# Create and activate a virtual environment
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Set up environment variables
-cp .env.example .env
-# Edit .env with your actual API keys
-```
-
-### Running Locally
-
-```bash
-python bot.py
-```
 
 ## Bot Commands
 
@@ -93,26 +59,27 @@ You can also send any message to chat with Milo naturally about training, nutrit
 ## Roadmap
 
 - [x] Telegram bot with command handlers
-- [x] Claude AI conversational coaching
+- [x] AI conversational coaching
 - [x] Four pillar coaching framework
+- [x] Supabase user profiles
+- [x] Railway deployment
 - [ ] Whoop OAuth integration and data sync
 - [ ] Withings OAuth integration and data sync
-- [ ] Supabase user profiles and workout logging
 - [ ] Workout parsing and progressive overload tracking
 - [ ] Daily morning check-in cron jobs
 - [ ] Weekly progress summary reports
 - [ ] Body composition trend visualization
 - [ ] Training program templates
-- [ ] Multi-user support with personalized coaching history
-- [ ] Railway deployment with CI/CD
+- [ ] Personalized coaching history per user
 
 ## Project Structure
 
 ```
 milo-bot/
 ├── bot.py                  # Main entry point
-├── agent.py                # Claude AI coaching brain
+├── agent.py                # AI coaching brain
 ├── requirements.txt        # Python dependencies
+├── Procfile                # Railway deployment
 ├── .env.example            # Environment variable template
 │
 ├── integrations/           # Third-party API connections
@@ -138,7 +105,9 @@ milo-bot/
 
 ## License
 
-This is an open source project. Contributions, issues, and feature requests are welcome.
+Copyright (c) 2026 Gavin Michelsen. All rights reserved.
+
+This project is open source for viewing and learning purposes. See [LICENSE](LICENSE) for terms.
 
 ---
 
