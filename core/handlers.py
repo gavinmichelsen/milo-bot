@@ -13,7 +13,7 @@ from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
 from agent import get_coaching_response
-from core.database import upsert_user
+from core.database import upsert_user, get_whoop_tokens
 from core.oauth_state import create_state
 from integrations.whoop import WhoopClient
 from utils.logger import setup_logger
@@ -106,14 +106,83 @@ async def connect_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def stats_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle the /stats command to show latest metrics."""
-    logger.info(f"/stats from user {update.effective_user.id}")
-    await update.message.reply_text(
-        "Stats dashboard coming soon.\n\n"
-        "This will show your latest Whoop recovery, HRV, resting heart rate, "
-        "Withings weight, body fat %, and recent training volume.",
-        parse_mode="Markdown",
-    )
+    """Handle the /stats command — fetch and display latest Whoop recovery data."""
+    telegram_id = update.effective_user.id
+    logger.info(f"/stats from user {telegram_id}")
+
+    # Get stored Whoop tokens
+    try:
+        tokens = get_whoop_tokens(telegram_id)
+    except Exception as e:
+        logger.error(f"Failed to fetch Whoop tokens for {telegram_id}: {e}")
+        await update.message.reply_text(
+            "Couldn't fetch your stats right now. Try again in a moment."
+        )
+        return
+
+    if not tokens:
+        await update.message.reply_text(
+            "You haven't connected Whoop yet. Use /connect to get started."
+        )
+        return
+
+    access_token = tokens.get("access_token")
+    if not access_token:
+        await update.message.reply_text(
+            "Your Whoop connection seems broken. Use /connect to reconnect."
+        )
+        return
+
+    # Fetch latest recovery from Whoop API
+    try:
+        whoop = WhoopClient()
+        recovery_data = await whoop.get_recovery(access_token)
+        await whoop.close()
+    except Exception as e:
+        logger.error(f"Whoop API call failed for {telegram_id}: {e}")
+        await update.message.reply_text(
+            "Couldn't fetch your stats right now. Try again in a moment."
+        )
+        return
+
+    # Parse the recovery response
+    try:
+        records = recovery_data.get("records", [])
+        if not records:
+            await update.message.reply_text(
+                "No recovery data available yet. "
+                "Make sure you wore your Whoop to sleep last night."
+            )
+            return
+
+        latest = records[0]
+        score = latest.get("score", {})
+        recovery_score = score.get("recovery_score")
+        hrv = score.get("hrv_rmssd_milli")
+        resting_hr = score.get("resting_heart_rate")
+        sleep_perf = score.get("sleep_performance_percentage")
+
+        lines = []
+        if recovery_score is not None:
+            lines.append(f"\U0001f7e2 Recovery Score: {recovery_score:.0f}%")
+        if hrv is not None:
+            lines.append(f"\u2764\ufe0f HRV: {hrv:.0f}ms")
+        if resting_hr is not None:
+            lines.append(f"\U0001f4a4 Resting HR: {resting_hr:.0f}bpm")
+        if sleep_perf is not None:
+            lines.append(f"\U0001f634 Sleep Performance: {sleep_perf:.0f}%")
+
+        if lines:
+            await update.message.reply_text("\n".join(lines))
+        else:
+            await update.message.reply_text(
+                "Recovery data came back empty. Try again later."
+            )
+    except Exception as e:
+        logger.error(f"Failed to parse Whoop recovery for {telegram_id}: {e}")
+        await update.message.reply_text(
+            "Couldn't fetch your stats right now. Try again in a moment."
+        )
 
 
 async def progress_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
