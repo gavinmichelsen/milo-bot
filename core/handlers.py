@@ -13,7 +13,8 @@ from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
 from agent import get_coaching_response
-from core.database import upsert_user, create_oauth_state, get_whoop_tokens
+from core.database import upsert_user
+from core.oauth_state import create_state
 from integrations.whoop import WhoopClient
 from utils.logger import setup_logger
 
@@ -80,42 +81,28 @@ async def connect_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     telegram_id = update.effective_user.id
     logger.info(f"/connect from user {telegram_id}")
 
-    # Check if already connected
     try:
-        existing = get_whoop_tokens(telegram_id)
-        if existing:
-            await update.message.reply_text(
-                "Your Whoop is already connected!\n\n"
-                "Use /stats to see your latest data. "
-                "To reconnect, use /connect again later.",
-            )
-            return
-    except Exception as e:
-        logger.error(f"Failed to check Whoop tokens for {telegram_id}: {e}")
+        # Generate in-memory OAuth state (no database dependency)
+        state = create_state(telegram_id)
 
-    # Generate OAuth state and URL
-    try:
-        state = create_oauth_state(telegram_id)
+        whoop = WhoopClient()
+        auth_url = whoop.get_auth_url(WHOOP_REDIRECT_URI, state)
+
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("Connect Whoop", url=auth_url)]
+        ])
+
+        await update.message.reply_text(
+            "Tap the button below to connect your Whoop account.\n\n"
+            "You'll be redirected to Whoop to authorize access to your "
+            "recovery, sleep, and workout data.",
+            reply_markup=keyboard,
+        )
     except Exception as e:
-        logger.error(f"Failed to create OAuth state for {telegram_id}: {e}")
+        logger.error(f"/connect failed for {telegram_id}: {e}")
         await update.message.reply_text(
             "Something went wrong. Please try /connect again in a moment."
         )
-        return
-
-    whoop = WhoopClient()
-    auth_url = whoop.get_auth_url(WHOOP_REDIRECT_URI, state)
-
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("Connect Whoop", url=auth_url)]
-    ])
-
-    await update.message.reply_text(
-        "Tap the button below to connect your Whoop account.\n\n"
-        "You'll be redirected to Whoop to authorize access to your "
-        "recovery, sleep, and workout data.",
-        reply_markup=keyboard,
-    )
 
 
 async def stats_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
