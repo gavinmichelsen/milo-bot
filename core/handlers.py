@@ -178,7 +178,19 @@ async def stats_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if withings_tokens and withings_tokens.get("access_token"):
         try:
-            measurements = await get_latest_measurements(withings_tokens["access_token"])
+            try:
+                measurements = await get_latest_measurements(withings_tokens["access_token"])
+            except Exception as e:
+                if "invalid_token" in str(e) or "401" in str(e):
+                    logger.info(f"Withings token expired for {telegram_id}, refreshing...")
+                    from integrations.withings import refresh_withings_token
+                    from core.database import store_withings_tokens
+                    new_tokens = await refresh_withings_token(withings_tokens["refresh_token"])
+                    store_withings_tokens(telegram_id, new_tokens)
+                    measurements = await get_latest_measurements(new_tokens["access_token"])
+                else:
+                    raise
+
             weight = measurements.get("weight_lbs")
             fat = measurements.get("fat_ratio")
 

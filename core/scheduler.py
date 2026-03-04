@@ -123,8 +123,8 @@ async def start_scheduler(app):
     """Register all scheduled jobs and start the scheduler."""
     scheduler.add_job(morning_checkin, "cron", hour=7, minute=0, id="morning_checkin")
     scheduler.add_job(weekly_progress_summary, "cron", day_of_week="sun", hour=18, minute=0, id="weekly_summary")
-    scheduler.add_job(refresh_whoop_tokens_job, "interval", minutes=50, id="whoop_token_refresh")
-    scheduler.add_job(refresh_withings_tokens_job, "interval", minutes=150, id="withings_token_refresh")
+    scheduler.add_job(refresh_whoop_tokens_job, "interval", minutes=50, id="whoop_token_refresh", misfire_grace_time=300)
+    scheduler.add_job(refresh_withings_tokens_job, "interval", minutes=60, id="withings_token_refresh", misfire_grace_time=300)
     scheduler.start()
     logger.info("Scheduler started — running initial token refresh...")
 
