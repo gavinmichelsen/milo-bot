@@ -217,11 +217,16 @@ def store_withings_tokens(telegram_id: int, token_data: dict) -> None:
         "Prefer": "resolution=merge-duplicates,return=minimal",
     }
 
+    expires_in = token_data.get("expires_in", 10800)
+    expires_at = (
+        datetime.now(timezone.utc) + timedelta(seconds=expires_in)
+    ).isoformat()
+
     payload = {
         "telegram_id": telegram_id,
         "access_token": token_data.get("access_token"),
         "refresh_token": token_data.get("refresh_token"),
-        "expires_in": token_data.get("expires_in"),
+        "expires_at": expires_at,
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
 
