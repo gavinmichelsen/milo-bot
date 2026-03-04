@@ -152,7 +152,6 @@ async def stats_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     raise
             await whoop.close()
 
-            logger.info(f"Whoop raw recovery response: {recovery_data}")
             records = recovery_data.get("records", [])
             if records:
                 score = records[0].get("score", {})
