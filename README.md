@@ -26,6 +26,16 @@ Milo runs scheduled jobs that proactively reach out. It refreshes your Whoop and
 
 Under the hood, it's built around an **agent harness** pattern. There's a system prompt that defines Milo's coaching philosophy and boundaries, a context injection layer that assembles real-time data from multiple APIs into structured blocks, and a security layer that enforces topic scope, blocks prompt injection attempts, and rate-limits abuse. Claude doesn't just answer questions. It reasons over your actual biometric data to produce coaching that's specific to *you*, right now, today.
 
+## Hybrid Coaching Engine (v1)
+
+Milo uses a **hybrid deterministic + AI** architecture for coaching decisions. This is the core of what makes it reliable.
+
+**Deterministic state layer.** Recovery status, nutrition targets, and training guidance are computed from raw biometric data using evidence-based thresholds and formulas. Recovery evaluation pulls 7-30 days of Whoop snapshots and scores HRV trend, resting heart rate trend, sleep duration, and sleep efficiency into a composite tier (green/yellow/red). Nutrition state computes TDEE, calorie targets, and protein targets from user profile and body composition using Mifflin-St Jeor + activity multipliers. Training guidance adjusts volume and intensity based on recovery tier and workout history.
+
+**AI reasoning layer.** Claude receives the deterministic state as constraints and reasons flexibly within those bounds. It won't contradict calorie targets or suggest hard training on a red recovery day. But it can explain *why* you should deload, connect your poor sleep to your elevated resting heart rate, and adapt its tone to how you're feeling. The deterministic layer ensures consistency; the AI layer ensures the coaching feels human.
+
+**Research-backed logic.** The coaching rules are grounded in ~12,000 lines of research documentation covering TDEE and calorie cycling, volume progression and periodization, autoregulation and deload protocols, recovery science and nocebo effects, ad libitum dietary approaches, sleep hygiene, protein phasing, and programming principles.
+
 ## The Four Coaching Pillars
 
 Milo coaches across four domains, and every recommendation ties back to your real data when it's available.
@@ -41,51 +51,69 @@ Milo coaches across four domains, and every recommendation ties back to your rea
 ## Tech Stack and Architecture
 
 ```
-┌─────────────────────────────────────────────────────┐
-│                   Telegram User                      │
-│              (commands + free-form chat)              │
-└──────────────────────┬──────────────────────────────┘
-                       │
-                       ▼
-┌──────────────────────────────────────────────────────┐
-│                    bot.py                             │
-│         Telegram polling + aiohttp web server         │
-│         (runs concurrently via asyncio)               │
-└──────┬───────────┬────────────┬──────────────────────┘
-       │           │            │
-       ▼           ▼            ▼
-┌──────────┐ ┌──────────┐ ┌───────────────────────────┐
-│ handlers │ │ OAuth    │ │ scheduler.py               │
-│ .py      │ │ server   │ │ APScheduler cron jobs      │
-│          │ │ (aiohttp)│ │ - morning check-in (7 AM)  │
-│ /start   │ │          │ │ - weekly summary (Sun 6 PM)│
-│ /connect │ │ /auth/   │ │ - Whoop refresh (50 min)   │
-│ /stats   │ │  whoop/  │ │ - Withings refresh (2.5hr) │
-│ /log     │ │  callback│ │ - startup token refresh    │
-│ /help    │ │ /auth/   │ │                            │
-│ /progress│ │  withings│ │                            │
-│ chat msg │ │  /callback│ │                            │
-└──────┬───┘ └─────┬────┘ └───────────────────────────┘
-       │           │
-       ▼           ▼
-┌──────────────────────────────────────────────────────┐
-│                   core/database.py                    │
-│            Supabase (PostgreSQL) via REST API         │
-│                                                      │
-│  users │ whoop_tokens │ withings_tokens │ workouts   │
-└──────────────────────────────────────────────────────┘
-       │
-       ▼
-┌──────────────────────────────────────────────────────┐
-│                     agent.py                          │
-│              Claude AI Coaching Brain                 │
-│                                                      │
-│  System prompt (coaching/prompts.py)                 │
-│  + User context injection (Whoop + Withings + workouts)│
-│  + Security layer (rate limit, topic scope, anti-PII) │
-│  → Claude API call (model configurable via MILO_MODEL)│
-│  → Personalized coaching response                    │
-└──────────────────────────────────────────────────────┘
++-----------------------------------------------------+
+|                   Telegram User                      |
+|              (commands + free-form chat)              |
++------------------------+----------------------------+
+                         |
+                         v
++------------------------------------------------------+
+|                    bot.py                             |
+|         Telegram polling + aiohttp web server        |
+|         (runs concurrently via asyncio)              |
++------+----------+----------+------------------------+
+       |          |          |
+       v          v          v
++----------+ +----------+ +---------------------------+
+| handlers | | OAuth    | | scheduler.py              |
+| .py      | | server   | | APScheduler cron jobs     |
+|          | | (aiohttp)| | - morning check-in (7 AM) |
+| /start   | |          | | - weekly summary (Sun 6PM)|
+| /connect | | /auth/   | | - Whoop refresh (50 min)  |
+| /stats   | |  whoop/  | | - Withings refresh (2.5hr)|
+| /sleep   | |  callback| | - startup token refresh   |
+| /strain  | | /auth/   | |                           |
+| /workout | |  withings| |                           |
+| /body    | |  /callback|                            |
+| /log     | +----------+ +---------------------------+
+| /profile |
+| /progress|
+| /help    |
+| chat msg |
++------+---+
+       |
+       v
++------------------------------------------------------+
+|              Coaching State Engine                    |
+|                                                      |
+|  coaching/recovery.py  - HRV/RHR/sleep -> tier       |
+|  coaching/nutrition.py - TDEE/macros -> targets       |
+|  coaching/training.py  - volume/intensity guidance    |
+|  coaching/progress.py  - trend tracking               |
++------+-----------------------------------------------+
+       |
+       v
++------------------------------------------------------+
+|                   core/database.py                   |
+|            Supabase (PostgreSQL) via REST API         |
+|                                                      |
+|  users | whoop_tokens | withings_tokens | workouts   |
+|  whoop_snapshots | body_metrics | user_profiles      |
+|  nutrition_states | recovery_daily_status             |
++------+-----------------------------------------------+
+       |
+       v
++------------------------------------------------------+
+|                     agent.py                         |
+|              Claude AI Coaching Brain                 |
+|                                                      |
+|  System prompt (coaching/prompts.py)                 |
+|  + Deterministic state constraints                   |
+|  + User context injection (Whoop + Withings + lifts) |
+|  + Security layer (rate limit, topic scope, anti-PII)|
+|  -> Claude API call (model configurable via MILO_MODEL)|
+|  -> Personalized coaching response                   |
++------------------------------------------------------+
 ```
 
 | Component | Technology | Why |
@@ -101,6 +129,8 @@ Milo coaches across four domains, and every recommendation ties back to your rea
 | HTTP | httpx + aiohttp | httpx for external API calls with retry/transport, aiohttp for the OAuth callback server |
 
 ## Key Engineering Decisions
+
+**Hybrid deterministic + AI coaching.** Rather than letting Claude make all coaching decisions freeform, Milo computes recovery tiers, nutrition targets, and training guidance deterministically from raw data. Claude receives these as constraints it must respect. This gives you reproducible, evidence-based coaching with the conversational flexibility of an LLM.
 
 **Concurrent polling + web server.** Telegram bots typically use either polling or webhooks. Milo uses polling for simplicity (no SSL cert management, works locally for development) but also needs to receive OAuth callbacks from Whoop and Withings. So I run the Telegram polling loop and an aiohttp web server concurrently in the same asyncio event loop. One process, two interfaces.
 
@@ -128,7 +158,8 @@ milo-bot/
 │
 ├── core/
 │   ├── handlers.py         # Telegram command handlers (/start, /connect, /stats, etc.)
-│   ├── database.py         # Supabase layer for users, tokens, workouts
+│   ├── database.py         # Supabase layer for users, tokens, workouts, snapshots, state
+│   ├── user_context.py     # Builds live coaching context from all data sources
 │   ├── oauth_server.py     # aiohttp routes for Whoop + Withings OAuth callbacks
 │   ├── oauth_state.py      # In-memory OAuth state store with TTL
 │   └── scheduler.py        # APScheduler jobs for check-ins, summaries, token refresh
@@ -140,10 +171,26 @@ milo-bot/
 ├── coaching/
 │   ├── prompts.py          # System prompt + morning/weekly templates
 │   ├── security.py         # Rate limiting, prompt injection blocking, topic scope
-│   ├── training.py         # Resistance training coaching logic
-│   ├── nutrition.py        # Nutrition coaching logic
+│   ├── recovery.py         # Deterministic recovery evaluation (HRV, RHR, sleep -> tier)
+│   ├── training.py         # Training guidance (volume, intensity, overload tracking)
+│   ├── nutrition.py        # Nutrition state (TDEE, calories, protein targets)
+│   ├── progress.py         # Trend tracking and progress analysis
 │   ├── sleep.py            # Sleep coaching logic
 │   └── lifestyle.py        # Lifestyle coaching logic
+│
+├── coaching-logic/         # Research documentation (~12,000 lines)
+│   ├── milo_master_research.md
+│   ├── track1_tdee_calories.md
+│   ├── track2_volume_progression.md
+│   ├── track3_autoregulation_deloads.md
+│   ├── track4_recovery_nocebo.md
+│   ├── track5_ad_libitum.md
+│   ├── track6_sleep_hygiene.md
+│   ├── track7_protein_phases.md
+│   └── track8_programming.md
+│
+├── supabase/
+│   └── migrations/         # PostgreSQL schema migrations
 │
 └── utils/
     ├── logger.py           # Structured logging setup
@@ -156,8 +203,13 @@ milo-bot/
 |---------|-------------|
 | `/start` | Saves your profile and introduces Milo with the Milo of Croton story |
 | `/connect` | Shows inline buttons to connect Whoop and Withings via OAuth |
-| `/stats` | Pulls live data: recovery score, HRV, resting HR, weight, body fat % |
+| `/stats` | Full coaching dashboard: recovery tier, training guidance, nutrition targets, live biometrics |
+| `/sleep` | Detailed sleep breakdown from Whoop (duration, efficiency, stages, disturbances) |
+| `/strain` | Daily strain score and cardiovascular load from Whoop |
+| `/workout` | Recent workout details from Whoop (activity type, strain, duration) |
+| `/body` | Body composition from Withings (weight, body fat %) |
 | `/log` | Log a workout (e.g. `bench press 3x5 185lbs`) for progressive overload tracking |
+| `/profile` | View or set coaching profile (sex, age, height, weight, goal, experience, training days) |
 | `/progress` | View your trends over time |
 | `/help` | List all commands |
 
@@ -171,23 +223,31 @@ Or just send a message. Ask Milo anything about training, nutrition, sleep, or l
 - [x] Four pillar coaching framework (training, sleep, nutrition, lifestyle)
 - [x] Whoop OAuth 2.0 integration: connect, token exchange, token refresh
 - [x] Withings OAuth 2.0 integration: HMAC-SHA256 signed requests, token refresh
-- [x] Live `/stats` pulling real Whoop recovery + Withings body composition
-- [x] Supabase database layer with user profiles and device token storage
+- [x] Live `/stats` dashboard pulling Whoop recovery + Withings body composition
+- [x] Supabase database layer with user profiles, device tokens, and coaching state
 - [x] Automatic token refresh (Whoop every 50 min, Withings every 2.5 hr)
 - [x] Startup token refresh so data is fresh after every deploy
-- [x] 401 auto-retry with transparent token refresh in /stats
+- [x] 401 auto-retry with transparent token refresh
 - [x] Security layer: rate limiting, prompt injection detection, topic scope enforcement
 - [x] Railway deployment with health checks and auto-deploy on push
+- [x] Hybrid coaching engine: deterministic recovery/nutrition/training state + Claude AI overlay
+- [x] Recovery evaluation from 7-30 day Whoop snapshots (HRV, RHR, sleep duration, sleep efficiency)
+- [x] Nutrition state computation (TDEE, calorie targets, protein targets from profile + body comp)
+- [x] Training guidance with progressive overload suggestions
+- [x] Morning check-in cron job with personalized training recommendations based on overnight recovery
+- [x] Weekly progress summary with aggregated sleep, body comp trends, training volume
+- [x] `/sleep`, `/strain`, `/workout`, `/body` commands for detailed biometric views
+- [x] `/profile` command for setting coaching parameters (goal, experience, training days)
+- [x] Real biometric data injected into every conversational coaching response
+- [x] ~12,000 lines of evidence-based coaching research documentation
+- [x] Foreign key constraints and schema integrity across all tables
 
 **Coming next:**
-- [ ] Workout parsing and progressive overload tracking from `/log` entries
-- [ ] Daily morning check-in cron job with personalized training recommendations based on overnight recovery
-- [ ] Weekly progress summary with aggregated sleep, body comp trends, training volume
-- [ ] Inject real Whoop + Withings data into every conversational coaching response (not just /stats)
 - [ ] Body composition trend visualization
+- [ ] Time-based deload recommendations (proactive, not just reactive to red recovery)
 - [ ] Training program templates with auto-regulation based on recovery
-- [ ] Multi-turn conversation memory per user
-- [ ] Personalized coaching history stored in Supabase
+- [ ] Extended conversation memory beyond 6-message window
+- [ ] Coaching history analysis and long-term pattern recognition
 
 ## License
 

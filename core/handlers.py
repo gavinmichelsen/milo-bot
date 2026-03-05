@@ -111,11 +111,29 @@ PROFILE_ALLOWED_VALUES = {
 }
 
 
+_PROFILE_BOUNDS = {
+    "age_years": (13, 120),
+    "training_days_per_week": (1, 7),
+    "height_cm": (100, 250),
+    "body_weight_lbs": (50, 700),
+    "estimated_body_fat_pct": (3, 60),
+    "activity_multiplier": (1.0, 2.5),
+}
+
+
 def _coerce_profile_value(field: str, raw_value: str):
     if field in {"age_years", "training_days_per_week"}:
-        return int(raw_value)
+        val = int(raw_value)
+        lo, hi = _PROFILE_BOUNDS[field]
+        if not (lo <= val <= hi):
+            raise ValueError(f"{field} must be between {lo} and {hi}")
+        return val
     if field in {"height_cm", "body_weight_lbs", "estimated_body_fat_pct", "activity_multiplier"}:
-        return float(raw_value)
+        val = float(raw_value)
+        lo, hi = _PROFILE_BOUNDS[field]
+        if not (lo <= val <= hi):
+            raise ValueError(f"{field} must be between {lo} and {hi}")
+        return val
     value = raw_value.lower()
     allowed = PROFILE_ALLOWED_VALUES.get(field)
     if allowed and value not in allowed:
@@ -444,8 +462,16 @@ async def stats_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             try:
                 measurements = await get_latest_measurements(withings_tokens["access_token"])
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code == 401:
+                    logger.info(f"Withings token expired for {telegram_id}, refreshing...")
+                    new_tokens = await refresh_withings_token(withings_tokens["refresh_token"])
+                    store_withings_tokens(telegram_id, new_tokens)
+                    measurements = await get_latest_measurements(new_tokens["access_token"])
+                else:
+                    raise
             except Exception as e:
-                if "invalid_token" in str(e) or "401" in str(e):
+                if "invalid_token" in str(e):
                     logger.info(f"Withings token expired for {telegram_id}, refreshing...")
                     new_tokens = await refresh_withings_token(withings_tokens["refresh_token"])
                     store_withings_tokens(telegram_id, new_tokens)
@@ -879,8 +905,16 @@ async def body_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             try:
                 measurements = await get_latest_measurements(withings_tokens["access_token"])
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code == 401:
+                    logger.info(f"Withings token expired for {telegram_id}, refreshing...")
+                    new_tokens = await refresh_withings_token(withings_tokens["refresh_token"])
+                    store_withings_tokens(telegram_id, new_tokens)
+                    measurements = await get_latest_measurements(new_tokens["access_token"])
+                else:
+                    raise
             except Exception as e:
-                if "invalid_token" in str(e) or "401" in str(e):
+                if "invalid_token" in str(e):
                     logger.info(f"Withings token expired for {telegram_id}, refreshing...")
                     new_tokens = await refresh_withings_token(withings_tokens["refresh_token"])
                     store_withings_tokens(telegram_id, new_tokens)
