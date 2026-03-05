@@ -2,7 +2,7 @@
 Whoop API integration for Milo bot.
 
 Handles OAuth 2.0 authentication and fetching recovery, strain,
-and sleep data from the Whoop platform.
+sleep, workout, and body measurement data from the Whoop platform.
 
 Whoop API docs: https://developer.whoop.com/
 """
@@ -22,11 +22,32 @@ WHOOP_TOKEN_URL = "https://api.prod.whoop.com/oauth/oauth2/token"
 WHOOP_API_BASE = "https://api.prod.whoop.com/developer/v2"
 
 
+def kilojoules_to_calories(kj: float) -> float:
+    """Convert kilojoules to calories (1 kJ = 0.239006 calories)."""
+    if kj is None:
+        return None
+    return round(kj * 0.239006, 1)
+
+
+def kilograms_to_pounds(kg: float) -> float:
+    """Convert kilograms to pounds (1 kg = 2.20462 lbs)."""
+    if kg is None:
+        return None
+    return round(kg * 2.20462, 1)
+
+
+def meters_to_feet(meters: float) -> float:
+    """Convert meters to feet (1 m = 3.28084 feet)."""
+    if meters is None:
+        return None
+    return round(meters * 3.28084, 1)
+
+
 class WhoopClient:
     """Client for interacting with the Whoop API.
 
     Manages OAuth tokens and provides methods to fetch
-    recovery, sleep, and strain data for a user.
+    recovery, sleep, strain, workout, and body data for a user.
     """
 
     def __init__(self):
@@ -48,7 +69,7 @@ class WhoopClient:
             "client_id": self.client_id,
             "redirect_uri": redirect_uri,
             "response_type": "code",
-            "scope": "read:recovery read:sleep read:workout read:body_measurement offline",
+            "scope": "read:recovery read:sleep read:workout read:cycles read:body_measurement offline",
             "state": state,
         }
         return f"{WHOOP_AUTH_URL}?{urlencode(params)}"
@@ -93,6 +114,58 @@ class WhoopClient:
             f"{WHOOP_API_BASE}/activity/sleep",
             headers={"Authorization": f"Bearer {access_token}"},
             params={"limit": 1},
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def get_cycles(self, access_token: str, limit: int = 1) -> dict:
+        """Fetch the latest daily cycles (strain data) from the v2 API.
+
+        Args:
+            access_token: Valid Whoop access token.
+            limit: Number of cycles to fetch (default 1).
+
+        Returns:
+            JSON response with cycle data including strain, heart rate, kilojoules.
+        """
+        response = await self.http.get(
+            f"{WHOOP_API_BASE}/cycles",
+            headers={"Authorization": f"Bearer {access_token}"},
+            params={"limit": limit},
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def get_workouts(self, access_token: str, limit: int = 1) -> dict:
+        """Fetch the latest workouts from the v2 API.
+
+        Args:
+            access_token: Valid Whoop access token.
+            limit: Number of workouts to fetch (default 1).
+
+        Returns:
+            JSON response with workout data including strain, heart rate, zones.
+        """
+        response = await self.http.get(
+            f"{WHOOP_API_BASE}/activity/workout",
+            headers={"Authorization": f"Bearer {access_token}"},
+            params={"limit": limit},
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def get_body_measurements(self, access_token: str) -> dict:
+        """Fetch the user's body measurements from the v2 API.
+
+        Args:
+            access_token: Valid Whoop access token.
+
+        Returns:
+            JSON response with height, weight, max heart rate.
+        """
+        response = await self.http.get(
+            f"{WHOOP_API_BASE}/user/body/measurements",
+            headers={"Authorization": f"Bearer {access_token}"},
         )
         response.raise_for_status()
         return response.json()
