@@ -7,6 +7,8 @@ from typing import Any
 from core.database import get_onboarding_state, upsert_onboarding_state, upsert_user_profile
 from core.user_context import build_user_context
 
+from agent import get_coaching_response
+
 WELCOME_PROMPT = (
     "Hey! I'm Milo, your AI fitness coach. I'm going to help you build a training plan and dial in your nutrition — all over Telegram.\n\n"
     "Before I can build anything useful, I need to get to know you a bit. It'll take maybe 10 minutes and I'll ask questions in chunks so it doesn't feel like a questionnaire. Ready to get started?"
@@ -53,8 +55,11 @@ GOAL_PROMPT = (
 
 EQUIPMENT_PROMPT = (
     "Last couple of logistical questions:\n\n"
-    "1. What's your equipment situation? Full gym with barbells, machines, everything — or more of a home gym or minimal setup?\n"
-    "2. Do you have any preference for how your training looks — more upper body focus, lower body, arms, or just balanced across everything?"
+    "1. Which best describes your setup?\n"
+    "  *Full gym* — barbell, squat rack, bench, dumbbells, cable machine, pull-up bar, leg press, machines\n"
+    "  *Home gym* — power rack/squat stand, barbell, dumbbells, bench (no machines)\n"
+    "  *Minimal* — dumbbells, bands, bodyweight only\n\n"
+    "2. Any training emphasis? Upper body, lower body, arms — or just balanced across everything? (say balanced if unsure)"
 )
 
 NUTRITION_PROMPT = (
@@ -236,6 +241,12 @@ async def process_onboarding_message(telegram_id: int, username: str, message_te
     step = state.get("current_step") or "welcome_ready"
     profile = dict(state.get("profile_data") or {})
     text = (message_text or "").strip()
+
+    # Detect clarifying questions and route to Claude instead of failing extraction
+    if step not in ("welcome_ready", "medical_age", "minor_clearance") and _is_question(text):
+        last_question = state.get("last_question")
+        answer = await _answer_onboarding_question(telegram_id, username, text, step, last_question)
+        return [answer]
 
     if step == "welcome_ready":
         if _is_affirmative(text):
@@ -470,6 +481,51 @@ def _prompt_for_step(step: str | None, profile: dict[str, Any]) -> str:
     return WELCOME_PROMPT
 
 
+def _is_question(text: str) -> bool:
+    """Detect if the user is asking a clarifying question rather than providing info."""
+    lowered = text.strip().lower()
+    if "?" in text:
+        return True
+    question_starters = [
+        "what ", "what's", "whats", "how ", "why ", "can you", "could you",
+        "should i", "do i", "is it", "what do you mean", "explain",
+        "tell me more", "give me", "help me", "i don't understand",
+        "i dont understand", "what does that mean", "can i ask",
+    ]
+    return any(lowered.startswith(s) or s in lowered for s in question_starters)
+
+
+STEP_CONTEXT = {
+    "basics": "asking for their sex, age, and height",
+    "weight_bodyfat": "asking for their weight and body fat percentage",
+    "training_background": "asking about their training history and injuries",
+    "injury_followup": "asking about injury details",
+    "goal_schedule": "asking about their fitness goal and training days per week",
+    "equipment": "asking about their gym equipment and training emphasis preference",
+    "nutrition_mode": "asking whether they want tracked calories or habit-based coaching",
+    "wearables": "asking if they use Whoop or Withings wearables",
+    "communication": "asking about their preferred coaching frequency",
+}
+
+
+async def _answer_onboarding_question(telegram_id: int, username: str, question: str, step: str, last_question: str | None) -> str:
+    """Route a clarifying question to Claude with onboarding context."""
+    step_desc = STEP_CONTEXT.get(step, "onboarding")
+    context = {
+        "telegram_id": telegram_id,
+        "username": username,
+        "onboarding_step": step,
+        "onboarding_context": (
+            f"The user is currently in the onboarding flow. Milo is {step_desc}. "
+            f"The last question Milo asked was: \"{last_question or 'N/A'}\". "
+            "Answer the user's question briefly (2-3 sentences max), then gently guide them "
+            "back to answering the onboarding question. Do NOT re-ask the full onboarding question — "
+            "just answer and nudge them back."
+        ),
+    }
+    return await get_coaching_response(question, context)
+
+
 def _is_affirmative(text: str) -> bool:
     lowered = text.strip().lower()
     return lowered in YES_WORDS or lowered.startswith("yes") or lowered.startswith("yep")
@@ -604,11 +660,14 @@ def _extract_goal_schedule(text: str) -> dict[str, Any]:
 def _extract_equipment(text: str) -> dict[str, Any]:
     lowered = text.lower()
     result: dict[str, Any] = {}
-    if any(word in lowered for word in ["home gym", "garage", "rack", "barbell at home"]):
+    if any(word in lowered for word in ["home gym", "garage", "rack", "barbell at home", "home setup"]):
         result["equipment_access"] = "home_gym"
-    elif any(word in lowered for word in ["minimal", "bodyweight", "bands", "dumbbells only", "hotel gym"]):
+    elif any(word in lowered for word in ["minimal", "bodyweight", "bands", "dumbbells only", "hotel gym", "apartment"]):
         result["equipment_access"] = "minimal"
-    elif "gym" in lowered or "full gym" in lowered or "commercial" in lowered:
+    elif any(word in lowered for word in [
+        "full gym", "full", "commercial", "gym", "everything",
+        "machines", "cable", "leg press", "squat rack",
+    ]):
         result["equipment_access"] = "full_gym"
     if any(word in lowered for word in ["upper", "chest", "back", "shoulders"]):
         result["emphasis_preference"] = "upper"
@@ -616,7 +675,8 @@ def _extract_equipment(text: str) -> dict[str, Any]:
         result["emphasis_preference"] = "lower"
     elif any(word in lowered for word in ["arms", "biceps", "triceps"]):
         result["emphasis_preference"] = "arms"
-    elif any(word in lowered for word in ["balanced", "no preference", "overall", "everything"]):
+    else:
+        # Default to balanced — most users don't have a strong preference
         result["emphasis_preference"] = "balanced"
     return result
 
