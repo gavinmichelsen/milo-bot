@@ -2,6 +2,7 @@
 Shared utility functions used across the Milo bot.
 """
 
+from __future__ import annotations
 from datetime import datetime, timezone
 
 

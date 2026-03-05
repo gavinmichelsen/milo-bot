@@ -5,6 +5,8 @@ Analyzes Whoop sleep data to provide recovery optimization
 recommendations and sleep hygiene guidance.
 """
 
+from __future__ import annotations
+
 from utils.logger import setup_logger
 
 logger = setup_logger("milo.sleep")

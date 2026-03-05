@@ -28,6 +28,7 @@ from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, fil
 from core.handlers import (
     start_handler,
     connect_handler,
+    profile_handler,
     stats_handler,
     sleep_handler,
     strain_handler,
@@ -69,6 +70,7 @@ async def main():
     tg_app.add_handler(CommandHandler("body", body_handler))
     tg_app.add_handler(CommandHandler("progress", progress_handler))
     tg_app.add_handler(CommandHandler("log", log_handler))
+    tg_app.add_handler(CommandHandler("profile", profile_handler))
     tg_app.add_handler(CommandHandler("help", help_handler))
 
     # Conversational handler — routes all other text to the AI agent

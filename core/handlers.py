@@ -6,7 +6,10 @@ and is registered in bot.py. Conversational messages are routed
 to the Claude agent for AI coaching responses.
 """
 
+from __future__ import annotations
+
 import os
+import re
 
 import httpx
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -14,10 +17,29 @@ from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
 from agent import get_coaching_response
-from core.database import upsert_user, get_whoop_tokens, get_withings_tokens, store_whoop_tokens
+from coaching.training import build_training_guidance, check_progressive_overload, format_workout_log
+from coaching.progress import build_weekly_progress_summary
+from core.database import (
+    get_nutrition_state,
+    get_recent_body_metrics,
+    get_recent_recovery_statuses,
+    get_recent_whoop_snapshots,
+    get_user_profile,
+    get_whoop_tokens,
+    get_withings_tokens,
+    get_workout_history,
+    log_workout,
+    store_body_metrics,
+    store_chat_message,
+    store_whoop_snapshot,
+    store_whoop_tokens,
+    upsert_user,
+    upsert_user_profile,
+)
 from core.oauth_state import create_state
 from core.user_context import build_user_context
 from integrations.whoop import WhoopClient, refresh_whoop_token, kilojoules_to_calories
+from utils.helpers import parse_sets_reps
 from utils.logger import setup_logger
 
 logger = setup_logger("milo.handlers")
@@ -52,18 +74,79 @@ HELP_MESSAGE = """
 /body — Body measurements
 /progress — See your progress over time
 /log — Log a workout (e.g. `bench press 3x5 185lbs`)
+/profile — View or update your coaching profile
 /help — Show this help message
 
 You can also just *send me a message* and I'll coach you on training, nutrition, sleep, or lifestyle.
 """
 
 
-async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle the /start command — save the user to Supabase and send welcome message."""
-    user = update.effective_user
-    logger.info(f"/start from user {user.id}")
+PROFILE_FIELD_ALIASES = {
+    "sex": "sex",
+    "age": "age_years",
+    "age_years": "age_years",
+    "height": "height_cm",
+    "height_cm": "height_cm",
+    "weight": "body_weight_lbs",
+    "weight_lbs": "body_weight_lbs",
+    "bodyfat": "estimated_body_fat_pct",
+    "body_fat": "estimated_body_fat_pct",
+    "goal": "primary_goal",
+    "experience": "experience_level",
+    "experience_level": "experience_level",
+    "days": "training_days_per_week",
+    "training_days": "training_days_per_week",
+    "activity": "activity_multiplier",
+    "activity_multiplier": "activity_multiplier",
+    "nutrition": "nutrition_mode",
+    "wake": "target_wake_time",
+    "bed": "target_bedtime",
+}
 
-    # Save or update the user in Supabase
+PROFILE_ALLOWED_VALUES = {
+    "sex": {"male", "female"},
+    "primary_goal": {"fat_loss", "maintain", "muscle_gain", "recomp"},
+    "experience_level": {"beginner", "intermediate", "advanced"},
+    "nutrition_mode": {"tracked", "ad_libitum"},
+}
+
+
+def _coerce_profile_value(field: str, raw_value: str):
+    if field in {"age_years", "training_days_per_week"}:
+        return int(raw_value)
+    if field in {"height_cm", "body_weight_lbs", "estimated_body_fat_pct", "activity_multiplier"}:
+        return float(raw_value)
+    value = raw_value.lower()
+    allowed = PROFILE_ALLOWED_VALUES.get(field)
+    if allowed and value not in allowed:
+        raise ValueError(f"Invalid value for {field}: {raw_value}")
+    return value if allowed else raw_value
+
+
+def _format_profile(profile: dict | None) -> str:
+    if not profile:
+        return (
+            "No coaching profile saved yet.\n\n"
+            "Set one with:\n"
+            "/profile sex=male age=32 height_cm=178 goal=fat_loss experience=intermediate days=4 activity=1.55"
+        )
+
+    lines = ["Your coaching profile", ""]
+    lines.append(f"Sex: {profile.get('sex', 'N/A')}")
+    lines.append(f"Age: {profile.get('age_years', 'N/A')}")
+    lines.append(f"Height: {profile.get('height_cm', 'N/A')} cm")
+    lines.append(f"Weight: {profile.get('body_weight_lbs', 'N/A')} lb")
+    lines.append(f"Goal: {profile.get('primary_goal', 'N/A')}")
+    lines.append(f"Experience: {profile.get('experience_level', 'N/A')}")
+    lines.append(f"Training days: {profile.get('training_days_per_week', 'N/A')}")
+    lines.append(f"Activity multiplier: {profile.get('activity_multiplier', 'N/A')}")
+    lines.append(f"Nutrition mode: {profile.get('nutrition_mode', 'N/A')}")
+    lines.append("")
+    lines.append("Update fields with /profile key=value ...")
+    return "\n".join(lines)
+
+
+def _ensure_user_record(user) -> None:
     try:
         upsert_user(
             telegram_id=user.id,
@@ -73,6 +156,14 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     except Exception as e:
         logger.error(f"Failed to save user {user.id} to Supabase: {e}")
+
+
+async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle the /start command — save the user to Supabase and send welcome message."""
+    user = update.effective_user
+    logger.info(f"/start from user {user.id}")
+
+    _ensure_user_record(user)
 
     await update.message.reply_text(WELCOME_MESSAGE, parse_mode="Markdown")
 
@@ -84,6 +175,7 @@ async def connect_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     telegram_id = update.effective_user.id
     logger.info(f"/connect from user {telegram_id}")
+    _ensure_user_record(update.effective_user)
 
     try:
         whoop_state = create_state(telegram_id)
@@ -124,6 +216,75 @@ async def stats_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info(f"/stats from user {telegram_id}")
 
     lines = ["\U0001f4ca *Health Dashboard*", ""]
+    has_live_recovery = False
+    has_live_sleep = False
+    has_live_strain = False
+    has_live_body = False
+
+    try:
+        recent_whoop_snapshots = get_recent_whoop_snapshots(telegram_id, limit=1)
+    except Exception as e:
+        logger.error(f"Failed to fetch stored Whoop snapshots for {telegram_id}: {e}")
+        recent_whoop_snapshots = []
+
+    try:
+        recent_body_metrics = get_recent_body_metrics(telegram_id, limit=1)
+    except Exception as e:
+        logger.error(f"Failed to fetch stored body metrics for {telegram_id}: {e}")
+        recent_body_metrics = []
+
+    try:
+        recovery_statuses = get_recent_recovery_statuses(telegram_id, limit=1)
+    except Exception as e:
+        logger.error(f"Failed to fetch recovery status for {telegram_id}: {e}")
+        recovery_statuses = []
+
+    try:
+        nutrition_state = get_nutrition_state(telegram_id)
+    except Exception as e:
+        logger.error(f"Failed to fetch nutrition state for {telegram_id}: {e}")
+        nutrition_state = None
+
+    try:
+        user_profile = get_user_profile(telegram_id)
+    except Exception as e:
+        logger.error(f"Failed to fetch user profile for {telegram_id}: {e}")
+        user_profile = None
+
+    try:
+        training_history = get_workout_history(telegram_id, limit=10)
+    except Exception as e:
+        logger.error(f"Failed to fetch training history for {telegram_id}: {e}")
+        training_history = []
+
+    try:
+        training_guidance = build_training_guidance(
+            recovery_status=recovery_statuses[0] if recovery_statuses else None,
+            workout_history=training_history,
+            experience_level=(user_profile or {}).get("experience_level"),
+        )
+    except Exception as e:
+        logger.error(f"Failed to build training guidance for {telegram_id}: {e}")
+        training_guidance = None
+
+    latest_recovery_status = recovery_statuses[0] if recovery_statuses else None
+    if latest_recovery_status or nutrition_state or training_guidance:
+        lines.append("*Coaching State*")
+        if latest_recovery_status:
+            tier = str(latest_recovery_status.get("composite_tier", "N/A")).replace("_", " ")
+            training_action = str(latest_recovery_status.get("training_action", "N/A")).replace("_", " ")
+            lines.append(f"  Recovery tier: {tier}")
+            lines.append(f"  Training action: {training_action}")
+        if nutrition_state:
+            phase = str(nutrition_state.get("phase", "N/A")).replace("_", " ")
+            lines.append(f"  Nutrition phase: {phase}")
+            lines.append(f"  Calories: {nutrition_state.get('current_calorie_target', 'N/A')} kcal")
+            lines.append(f"  Protein: {nutrition_state.get('current_protein_target_g', 'N/A')} g")
+        if training_guidance:
+            lines.append(f"  Training phase: {training_guidance.get('phase', 'N/A')}")
+            lines.append(f"  Target RIR: {training_guidance.get('target_rir', 'N/A')}")
+            lines.append(f"  Session adjustment: {training_guidance.get('session_adjustment', 'N/A')}")
+        lines.append("")
 
     # --- Whoop data ---
     try:
@@ -146,6 +307,16 @@ async def stats_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     recovery_score = score.get("recovery_score")
                     hrv = score.get("hrv_rmssd_milli")
                     resting_hr = score.get("resting_heart_rate")
+                    has_live_recovery = True
+
+                    store_whoop_snapshot(
+                        telegram_id,
+                        {
+                            "recovery_score": recovery_score,
+                            "hrv": hrv,
+                            "resting_hr": resting_hr,
+                        },
+                    )
 
                     lines.append("*Recovery*")
                     if recovery_score is not None:
@@ -165,15 +336,62 @@ async def stats_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if records:
                     score = records[0].get("score", {})
                     perf = score.get("sleep_performance_percentage")
-                    stages = score.get("stage_summary", {})
-                    total_bed = stages.get("total_in_bed_time_milli")
+                    eff = score.get("sleep_efficiency_percentage")
+                    resp_rate = score.get("respiratory_rate")
+                    has_live_sleep = True
+
+                    total_bed = score.get("stage_summary", {}).get("total_in_bed_time_milli")
+                    awake = score.get("stage_summary", {}).get("total_awake_time_milli")
+                    light = score.get("stage_summary", {}).get("total_light_sleep_time_milli")
+                    deep = score.get("stage_summary", {}).get("total_slow_wave_sleep_time_milli")
+                    rem = score.get("stage_summary", {}).get("total_rem_sleep_time_milli")
+                    cycles = score.get("stage_summary", {}).get("sleep_cycle_count")
+                    disturbances = score.get("stage_summary", {}).get("disturbance_count")
+
+                    debt = score.get("sleep_needed", {}).get("need_from_sleep_debt_milli")
+                    sleep_duration_ms = None
+                    if any(value is not None for value in (light, deep, rem)):
+                        sleep_duration_ms = sum(value or 0 for value in (light, deep, rem))
+                    elif total_bed is not None:
+                        sleep_duration_ms = total_bed
+                    sleep_duration_hrs = round(sleep_duration_ms / 3_600_000, 2) if sleep_duration_ms is not None else None
+
+                    store_whoop_snapshot(
+                        telegram_id,
+                        {
+                            "sleep_duration_hrs": sleep_duration_hrs,
+                            "sleep_efficiency_pct": eff,
+                            "sleep_performance_pct": perf,
+                            "respiratory_rate": resp_rate,
+                        },
+                    )
 
                     lines.append("*Sleep*")
                     if perf is not None:
-                        lines.append(f"  Performance: {perf:.0f}%")
+                        lines.append(f"Performance: {perf:.0f}%")
                     if total_bed is not None:
-                        lines.append(f"  Time in bed: {_ms_to_hours_mins(total_bed)}")
+                        lines.append(f"Time in bed: {_ms_to_hours_mins(total_bed)}")
+                    if awake is not None:
+                        lines.append(f"Awake: {_ms_to_hours_mins(awake)}")
+
                     lines.append("")
+                    lines.append("*Sleep Stages*")
+                    if light is not None:
+                        lines.append(f"  Light: {_ms_to_hours_mins(light)}")
+                    if deep is not None:
+                        lines.append(f"  Deep (SWS): {_ms_to_hours_mins(deep)}")
+                    if rem is not None:
+                        lines.append(f"  REM: {_ms_to_hours_mins(rem)}")
+                    if cycles is not None:
+                        lines.append(f"  Cycles: {cycles}")
+                    if disturbances is not None:
+                        lines.append(f"  Disturbances: {disturbances}")
+
+                    if resp_rate is not None:
+                        lines.append(f"\nRespiratory rate: {resp_rate:.1f} rpm")
+                    if debt is not None and debt > 0:
+                        lines.append(f"Sleep debt: {_ms_to_hours_mins(debt)}")
+
             except Exception as e:
                 logger.error(f"Stats sleep fetch failed for {telegram_id}: {e}")
 
@@ -186,13 +404,27 @@ async def stats_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     strain = score.get("strain")
                     kj = score.get("kilojoule")
                     calories = kilojoules_to_calories(kj) if kj else None
+                    avg_hr = score.get("average_heart_rate")
+                    max_hr = score.get("max_heart_rate")
+                    has_live_strain = True
+
+                    store_whoop_snapshot(
+                        telegram_id,
+                        {
+                            "strain": strain,
+                        },
+                    )
 
                     lines.append("*Strain*")
                     if strain is not None:
                         lines.append(f"  \U0001f525 Score: {strain:.1f}")
                     if calories is not None:
                         lines.append(f"  Calories: {calories:.0f} cal")
-                    lines.append("")
+                    if avg_hr is not None:
+                        lines.append(f"  Avg HR: {avg_hr:.0f} bpm")
+                    if max_hr is not None:
+                        lines.append(f"  Max HR: {max_hr:.0f} bpm")
+
             except Exception as e:
                 logger.error(f"Stats strain fetch failed for {telegram_id}: {e}")
 
@@ -225,13 +457,73 @@ async def stats_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             fat = measurements.get("fat_ratio")
 
             if weight is not None or fat is not None:
+                has_live_body = True
+                store_body_metrics(
+                    telegram_id,
+                    {
+                        "weight_lbs": weight,
+                        "body_fat_pct": fat,
+                    },
+                )
                 lines.append("*Body*")
                 if weight is not None:
                     lines.append(f"  \u2696\ufe0f Weight: {weight} lbs")
                 if fat is not None:
                     lines.append(f"  Body fat: {fat}%")
+
         except Exception as e:
             logger.error(f"Withings API call failed for {telegram_id}: {e}")
+
+    latest_snapshot = recent_whoop_snapshots[0] if recent_whoop_snapshots else None
+    if latest_snapshot and not has_live_recovery:
+        recovery_score = latest_snapshot.get("recovery_score")
+        hrv = latest_snapshot.get("hrv")
+        resting_hr = latest_snapshot.get("resting_hr")
+        if recovery_score is not None or hrv is not None or resting_hr is not None:
+            lines.append("*Recovery*")
+            if recovery_score is not None:
+                lines.append(f"  \U0001f7e2 Score: {float(recovery_score):.0f}%")
+            if hrv is not None:
+                lines.append(f"  \u2764\ufe0f HRV: {float(hrv):.0f}ms")
+            if resting_hr is not None:
+                lines.append(f"  \U0001f4a4 Resting HR: {float(resting_hr):.0f}bpm")
+            lines.append("  Source: stored Whoop snapshot")
+            lines.append("")
+
+    if latest_snapshot and not has_live_sleep:
+        performance = latest_snapshot.get("sleep_performance_pct")
+        duration = latest_snapshot.get("sleep_duration_hrs")
+        efficiency = latest_snapshot.get("sleep_efficiency_pct")
+        if performance is not None or duration is not None or efficiency is not None:
+            lines.append("*Sleep*")
+            if performance is not None:
+                lines.append(f"  Performance: {float(performance):.0f}%")
+            if duration is not None:
+                lines.append(f"  Sleep duration: {float(duration):.1f}h")
+            if efficiency is not None:
+                lines.append(f"  Efficiency: {float(efficiency):.0f}%")
+            lines.append("  Source: stored Whoop snapshot")
+            lines.append("")
+
+    if latest_snapshot and not has_live_strain:
+        strain = latest_snapshot.get("strain")
+        if strain is not None:
+            lines.append("*Strain*")
+            lines.append(f"  \U0001f525 Score: {float(strain):.1f}")
+            lines.append("  Source: stored Whoop snapshot")
+            lines.append("")
+
+    latest_body_metric = recent_body_metrics[0] if recent_body_metrics else None
+    if latest_body_metric and not has_live_body:
+        weight = latest_body_metric.get("weight_lbs")
+        fat = latest_body_metric.get("body_fat_pct")
+        if weight is not None or fat is not None:
+            lines.append("*Body*")
+            if weight is not None:
+                lines.append(f"  \u2696\ufe0f Weight: {weight} lbs")
+            if fat is not None:
+                lines.append(f"  Body fat: {fat}%")
+            lines.append("  Source: stored body metrics")
 
     # --- Send response ---
     if len(lines) > 2:
@@ -296,6 +588,12 @@ async def sleep_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     telegram_id = update.effective_user.id
     logger.info(f"/sleep from user {telegram_id}")
 
+    try:
+        recent_snapshots = get_recent_whoop_snapshots(telegram_id, limit=1)
+    except Exception as e:
+        logger.error(f"Failed to fetch stored Whoop snapshots for {telegram_id}: {e}")
+        recent_snapshots = []
+
     result = await _get_whoop_access(telegram_id, update)
     if not result:
         return
@@ -303,70 +601,112 @@ async def sleep_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         sleep_data = await _whoop_api_call(whoop, access_token, telegram_id, whoop.get_sleep)
-        await whoop.close()
 
         records = sleep_data.get("records", [])
-        if not records:
-            await update.message.reply_text("No sleep data available yet.")
+        if records:
+            score = records[0].get("score", {})
+            stages = score.get("stage_summary", {})
+            sleep_needed = score.get("sleep_needed", {})
+
+            perf = score.get("sleep_performance_percentage")
+            eff = score.get("sleep_efficiency_percentage")
+            resp_rate = score.get("respiratory_rate")
+
+            total_bed = stages.get("total_in_bed_time_milli")
+            awake = stages.get("total_awake_time_milli")
+            light = stages.get("total_light_sleep_time_milli")
+            deep = stages.get("total_slow_wave_sleep_time_milli")
+            rem = stages.get("total_rem_sleep_time_milli")
+            cycles = stages.get("sleep_cycle_count")
+            disturbances = stages.get("disturbance_count")
+
+            debt = sleep_needed.get("need_from_sleep_debt_milli")
+            sleep_duration_ms = None
+            if any(value is not None for value in (light, deep, rem)):
+                sleep_duration_ms = sum(value or 0 for value in (light, deep, rem))
+            elif total_bed is not None:
+                sleep_duration_ms = total_bed
+            sleep_duration_hrs = round(sleep_duration_ms / 3_600_000, 2) if sleep_duration_ms is not None else None
+
+            store_whoop_snapshot(
+                telegram_id,
+                {
+                    "sleep_duration_hrs": sleep_duration_hrs,
+                    "sleep_efficiency_pct": eff,
+                    "sleep_performance_pct": perf,
+                    "respiratory_rate": resp_rate,
+                },
+            )
+
+            lines = ["\U0001f4a4 *Sleep Report*", ""]
+            if perf is not None:
+                lines.append(f"Performance: *{perf:.0f}%*")
+            if eff is not None:
+                lines.append(f"Efficiency: *{eff:.0f}%*")
+            if total_bed is not None:
+                lines.append(f"Time in bed: {_ms_to_hours_mins(total_bed)}")
+            if awake is not None:
+                lines.append(f"Awake: {_ms_to_hours_mins(awake)}")
+
+            lines.append("")
+            lines.append("*Sleep Stages*")
+            if light is not None:
+                lines.append(f"  Light: {_ms_to_hours_mins(light)}")
+            if deep is not None:
+                lines.append(f"  Deep (SWS): {_ms_to_hours_mins(deep)}")
+            if rem is not None:
+                lines.append(f"  REM: {_ms_to_hours_mins(rem)}")
+            if cycles is not None:
+                lines.append(f"  Cycles: {cycles}")
+            if disturbances is not None:
+                lines.append(f"  Disturbances: {disturbances}")
+
+            if resp_rate is not None:
+                lines.append(f"\nRespiratory rate: {resp_rate:.1f} rpm")
+            if debt is not None and debt > 0:
+                lines.append(f"Sleep debt: {_ms_to_hours_mins(debt)}")
+
+            await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
             return
-
-        score = records[0].get("score", {})
-        stages = score.get("stage_summary", {})
-        sleep_needed = score.get("sleep_needed", {})
-
-        perf = score.get("sleep_performance_percentage")
-        eff = score.get("sleep_efficiency_percentage")
-        resp_rate = score.get("respiratory_rate")
-
-        total_bed = stages.get("total_in_bed_time_milli")
-        awake = stages.get("total_awake_time_milli")
-        light = stages.get("total_light_sleep_time_milli")
-        deep = stages.get("total_slow_wave_sleep_time_milli")
-        rem = stages.get("total_rem_sleep_time_milli")
-        cycles = stages.get("sleep_cycle_count")
-        disturbances = stages.get("disturbance_count")
-
-        debt = sleep_needed.get("need_from_sleep_debt_milli")
-
-        lines = ["\U0001f4a4 *Sleep Report*", ""]
-        if perf is not None:
-            lines.append(f"Performance: *{perf:.0f}%*")
-        if eff is not None:
-            lines.append(f"Efficiency: *{eff:.0f}%*")
-        if total_bed is not None:
-            lines.append(f"Time in bed: {_ms_to_hours_mins(total_bed)}")
-        if awake is not None:
-            lines.append(f"Awake: {_ms_to_hours_mins(awake)}")
-
-        lines.append("")
-        lines.append("*Sleep Stages*")
-        if light is not None:
-            lines.append(f"  Light: {_ms_to_hours_mins(light)}")
-        if deep is not None:
-            lines.append(f"  Deep (SWS): {_ms_to_hours_mins(deep)}")
-        if rem is not None:
-            lines.append(f"  REM: {_ms_to_hours_mins(rem)}")
-        if cycles is not None:
-            lines.append(f"  Cycles: {cycles}")
-        if disturbances is not None:
-            lines.append(f"  Disturbances: {disturbances}")
-
-        if resp_rate is not None:
-            lines.append(f"\nRespiratory rate: {resp_rate:.1f} rpm")
-        if debt is not None and debt > 0:
-            lines.append(f"Sleep debt: {_ms_to_hours_mins(debt)}")
-
-        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
     except Exception as e:
         logger.error(f"/sleep failed for {telegram_id}: {e}")
-        await update.message.reply_text("Failed to fetch sleep data. Try again later.")
+    finally:
+        await whoop.close()
+
+    if recent_snapshots:
+        snapshot = recent_snapshots[0]
+        lines = ["\U0001f4a4 *Sleep Report*", ""]
+        duration = snapshot.get("sleep_duration_hrs")
+        performance = snapshot.get("sleep_performance_pct")
+        efficiency = snapshot.get("sleep_efficiency_pct")
+        respiratory_rate = snapshot.get("respiratory_rate")
+        if performance is not None:
+            lines.append(f"Performance: *{float(performance):.0f}%*")
+        if efficiency is not None:
+            lines.append(f"Efficiency: *{float(efficiency):.0f}%*")
+        if duration is not None:
+            lines.append(f"Sleep duration: {float(duration):.1f}h")
+        if respiratory_rate is not None:
+            lines.append(f"Respiratory rate: {float(respiratory_rate):.1f} rpm")
+        lines.append("")
+        lines.append("Source: stored Whoop snapshot")
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+        return
+
+    await update.message.reply_text("Failed to fetch sleep data. Try again later.")
 
 
 async def strain_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle the /strain command — show daily strain and calorie data."""
     telegram_id = update.effective_user.id
     logger.info(f"/strain from user {telegram_id}")
+
+    try:
+        recent_snapshots = get_recent_whoop_snapshots(telegram_id, limit=1)
+    except Exception as e:
+        logger.error(f"Failed to fetch stored Whoop snapshots for {telegram_id}: {e}")
+        recent_snapshots = []
 
     result = await _get_whoop_access(telegram_id, update)
     if not result:
@@ -375,37 +715,52 @@ async def strain_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         cycles_data = await _whoop_api_call(whoop, access_token, telegram_id, whoop.get_cycles)
-        await whoop.close()
 
         records = cycles_data.get("records", [])
-        if not records:
-            await update.message.reply_text("No strain data available yet.")
+        if records:
+            score = records[0].get("score", {})
+            strain = score.get("strain")
+            kj = score.get("kilojoule")
+            calories = kilojoules_to_calories(kj) if kj else None
+            avg_hr = score.get("average_heart_rate")
+            max_hr = score.get("max_heart_rate")
+
+            store_whoop_snapshot(
+                telegram_id,
+                {
+                    "strain": strain,
+                },
+            )
+
+            lines = ["\U0001f525 *Daily Strain*", ""]
+            if strain is not None:
+                lines.append(f"Strain: *{strain:.1f}*")
+            if calories is not None:
+                lines.append(f"Calories burned: {calories:.0f} cal")
+            if avg_hr is not None:
+                lines.append(f"Avg HR: {avg_hr:.0f} bpm")
+            if max_hr is not None:
+                lines.append(f"Max HR: {max_hr:.0f} bpm")
+
+            await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
             return
-
-        score = records[0].get("score", {})
-        strain = score.get("strain")
-        kj = score.get("kilojoule")
-        calories = kilojoules_to_calories(kj) if kj else None
-        avg_hr = score.get("average_heart_rate")
-        max_hr = score.get("max_heart_rate")
-
-        lines = ["\U0001f525 *Daily Strain*", ""]
-        if strain is not None:
-            lines.append(f"Strain: *{strain:.1f}*")
-        if calories is not None:
-            lines.append(f"Calories burned: {calories:.0f} cal")
-        if kj is not None:
-            lines.append(f"Kilojoules: {kj:.0f} kJ")
-        if avg_hr is not None:
-            lines.append(f"Avg heart rate: {avg_hr:.0f} bpm")
-        if max_hr is not None:
-            lines.append(f"Max heart rate: {max_hr:.0f} bpm")
-
-        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
     except Exception as e:
         logger.error(f"/strain failed for {telegram_id}: {e}")
-        await update.message.reply_text("Failed to fetch strain data. Try again later.")
+    finally:
+        await whoop.close()
+
+    if recent_snapshots:
+        snapshot = recent_snapshots[0]
+        strain = snapshot.get("strain")
+        lines = ["\U0001f525 *Daily Strain*", ""]
+        if strain is not None:
+            lines.append(f"Strain: *{float(strain):.1f}*")
+        lines.append("Source: stored Whoop snapshot")
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+        return
+
+    await update.message.reply_text("Failed to fetch strain data. Try again later.")
 
 
 async def workout_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -413,59 +768,88 @@ async def workout_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     telegram_id = update.effective_user.id
     logger.info(f"/workout from user {telegram_id}")
 
-    result = await _get_whoop_access(telegram_id, update)
-    if not result:
-        return
-    whoop, access_token = result
-
     try:
-        workout_data = await _whoop_api_call(whoop, access_token, telegram_id, whoop.get_workouts)
-        await whoop.close()
-
-        records = workout_data.get("records", [])
-        if not records:
-            await update.message.reply_text("No workout data available yet.")
-            return
-
-        record = records[0]
-        score = record.get("score", {})
-        strain = score.get("strain")
-        kj = score.get("kilojoule")
-        calories = kilojoules_to_calories(kj) if kj else None
-        avg_hr = score.get("average_heart_rate")
-        max_hr = score.get("max_heart_rate")
-        distance = score.get("distance_meter")
-        altitude = score.get("altitude_gain_meter")
-        zone_durations = score.get("zone_duration_milliseconds", {})
-
-        lines = ["\U0001f3cb\ufe0f *Latest Workout*", ""]
-        if strain is not None:
-            lines.append(f"Strain: *{strain:.1f}*")
-        if calories is not None:
-            lines.append(f"Calories: {calories:.0f} cal")
-        if avg_hr is not None:
-            lines.append(f"Avg HR: {avg_hr:.0f} bpm")
-        if max_hr is not None:
-            lines.append(f"Max HR: {max_hr:.0f} bpm")
-        if distance is not None and distance > 0:
-            lines.append(f"Distance: {distance:.0f}m")
-        if altitude is not None and altitude > 0:
-            lines.append(f"Altitude gain: {altitude:.0f}m")
-
-        if zone_durations:
-            lines.append("")
-            lines.append("*HR Zones*")
-            zone_names = ["Zone 1 (rest)", "Zone 2 (light)", "Zone 3 (moderate)", "Zone 4 (hard)", "Zone 5 (max)"]
-            for i, name in enumerate(zone_names):
-                zone_ms = zone_durations.get(str(i)) or zone_durations.get(i)
-                if zone_ms and zone_ms > 0:
-                    lines.append(f"  {name}: {_ms_to_hours_mins(zone_ms)}")
-
-        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
-
+        logged_workouts = get_workout_history(telegram_id, limit=1) or []
     except Exception as e:
-        logger.error(f"/workout failed for {telegram_id}: {e}")
-        await update.message.reply_text("Failed to fetch workout data. Try again later.")
+        logger.error(f"Failed to fetch logged workouts for {telegram_id}: {e}")
+        logged_workouts = []
+
+    def _manual_workout_reply():
+        if not logged_workouts:
+            return None
+        latest = logged_workouts[0]
+        weight = latest.get("weight_lbs", latest.get("weight", 0)) or 0
+        lines = ["\U0001f3cb\ufe0f *Latest Workout*", ""]
+        lines.append("Source: manual log")
+        lines.append(format_workout_log(latest.get("exercise", "workout"), latest.get("sets", 0), latest.get("reps", 0), float(weight)))
+        logged_at = latest.get("logged_at")
+        if logged_at:
+            lines.append(f"Logged at: {logged_at}")
+        notes = latest.get("notes")
+        if notes:
+            lines.append(f"Notes: {notes}")
+        return lines
+
+    whoop_tokens = None
+    try:
+        whoop_tokens = get_whoop_tokens(telegram_id)
+    except Exception as e:
+        logger.error(f"Failed to fetch Whoop tokens for {telegram_id}: {e}")
+
+    if whoop_tokens and whoop_tokens.get("access_token"):
+        whoop = WhoopClient()
+        try:
+            workout_data = await _whoop_api_call(whoop, whoop_tokens["access_token"], telegram_id, whoop.get_workouts)
+            records = workout_data.get("records", [])
+            if records:
+                record = records[0]
+                score = record.get("score", {})
+                strain = score.get("strain")
+                kj = score.get("kilojoule")
+                calories = kilojoules_to_calories(kj) if kj else None
+                avg_hr = score.get("average_heart_rate")
+                max_hr = score.get("max_heart_rate")
+                distance = score.get("distance_meter")
+                altitude = score.get("altitude_gain_meter")
+                zone_durations = score.get("zone_duration_milliseconds", {})
+
+                lines = ["\U0001f3cb\ufe0f *Latest Workout*", ""]
+                if strain is not None:
+                    lines.append(f"Strain: *{strain:.1f}*")
+                if calories is not None:
+                    lines.append(f"Calories: {calories:.0f} cal")
+                if avg_hr is not None:
+                    lines.append(f"Avg HR: {avg_hr:.0f} bpm")
+                if max_hr is not None:
+                    lines.append(f"Max HR: {max_hr:.0f} bpm")
+                if distance is not None and distance > 0:
+                    lines.append(f"Distance: {distance:.0f}m")
+                if altitude is not None and altitude > 0:
+                    lines.append(f"Altitude gain: {altitude:.0f}m")
+
+                if zone_durations:
+                    lines.append("")
+                    lines.append("*HR Zones*")
+                    zone_names = ["Zone 1 (rest)", "Zone 2 (light)", "Zone 3 (moderate)", "Zone 4 (hard)", "Zone 5 (max)"]
+                    for i, name in enumerate(zone_names):
+                        zone_ms = zone_durations.get(str(i)) or zone_durations.get(i)
+                        if zone_ms and zone_ms > 0:
+                            lines.append(f"  {name}: {_ms_to_hours_mins(zone_ms)}")
+
+                await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+                await whoop.close()
+                return
+        except Exception as e:
+            logger.error(f"/workout Whoop fetch failed for {telegram_id}: {e}")
+        finally:
+            await whoop.close()
+
+    manual_lines = _manual_workout_reply()
+    if manual_lines:
+        await update.message.reply_text("\n".join(manual_lines), parse_mode="Markdown")
+        return
+
+    await update.message.reply_text("No workout data available yet. Use /log to record a workout.")
 
 
 async def body_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -485,6 +869,12 @@ async def body_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Failed to fetch Withings tokens for {telegram_id}: {e}")
         withings_tokens = None
 
+    try:
+        recent_body_metrics = get_recent_body_metrics(telegram_id, limit=1)
+    except Exception as e:
+        logger.error(f"Failed to fetch stored body metrics for {telegram_id}: {e}")
+        recent_body_metrics = []
+
     if withings_tokens and withings_tokens.get("access_token"):
         try:
             try:
@@ -501,12 +891,30 @@ async def body_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             weight = measurements.get("weight_lbs")
             fat = measurements.get("fat_ratio")
 
+            store_body_metrics(
+                telegram_id,
+                {
+                    "weight_lbs": weight,
+                    "body_fat_pct": fat,
+                },
+            )
+
             if weight is not None:
                 lines.append(f"\u2696\ufe0f Weight: {weight} lbs")
             if fat is not None:
                 lines.append(f"\U0001f4ca Body fat: {fat}%")
         except Exception as e:
             logger.error(f"Withings body fetch failed for {telegram_id}: {e}")
+
+    if len(lines) == 2 and recent_body_metrics:
+        latest_metric = recent_body_metrics[0]
+        weight = latest_metric.get("weight_lbs")
+        fat = latest_metric.get("body_fat_pct")
+        if weight is not None:
+            lines.append(f"⚖️ Weight: {weight} lbs")
+        if fat is not None:
+            lines.append(f"📊 Body fat: {fat}%")
+        lines.append("Source: stored body metrics")
 
     # --- Whoop (supplemental: height, max HR) ---
     try:
@@ -543,26 +951,187 @@ async def body_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def progress_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle the /progress command to show trends over time."""
-    logger.info(f"/progress from user {update.effective_user.id}")
-    await update.message.reply_text(
-        "Progress tracking coming soon.\n\n"
-        "This will show your trends over time — strength PRs, "
-        "body composition changes, sleep improvements, and recovery patterns.",
-        parse_mode="Markdown",
-    )
+    telegram_id = update.effective_user.id
+    logger.info(f"/progress from user {telegram_id}")
+
+    try:
+        await build_user_context(
+            telegram_id=telegram_id,
+            username=update.effective_user.username or update.effective_user.first_name,
+        )
+
+        recovery_statuses = get_recent_recovery_statuses(telegram_id, limit=7)
+        body_metrics = get_recent_body_metrics(telegram_id, limit=8)
+        workouts = get_workout_history(telegram_id, limit=50)
+        nutrition_state = get_nutrition_state(telegram_id)
+
+        summary = build_weekly_progress_summary(
+            recovery_statuses=recovery_statuses,
+            body_metrics=body_metrics,
+            workouts=workouts,
+            nutrition_state=nutrition_state,
+        )
+    except Exception as e:
+        logger.error(f"/progress failed for {telegram_id}: {e}")
+        await update.message.reply_text("Failed to build your progress summary. Try again later.")
+        return
+
+    if not summary:
+        await update.message.reply_text(
+            "Not enough stored progress data yet. Connect your devices, log workouts, and let Milo build a week of history first."
+        )
+        return
+
+    await update.message.reply_text(summary)
 
 
 async def log_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle the /log command to record a workout."""
-    logger.info(f"/log from user {update.effective_user.id}")
-    await update.message.reply_text(
-        "To log a workout, send a message like:\n\n"
-        "`/log bench press 3x5 185lbs`\n"
-        "`/log squat 5x5 225lbs`\n"
-        "`/log deadlift 1x5 315lbs`\n\n"
-        "I'll track your lifts and monitor your progressive overload over time.",
-        parse_mode="Markdown",
-    )
+    telegram_id = update.effective_user.id
+    logger.info(f"/log from user {telegram_id}")
+    _ensure_user_record(update.effective_user)
+
+    if len(context.args) < 3:
+        await update.message.reply_text(
+            "Use /log like this:\n\n"
+            "`/log bench press 3x5 185lbs`\n"
+            "`/log squat 5x5 225lbs`\n"
+            "`/log deadlift 1x5 315lbs`",
+            parse_mode="Markdown",
+        )
+        return
+
+    sets_reps = parse_sets_reps(context.args[-2])
+    weight = _parse_weight_token(context.args[-1])
+    exercise = " ".join(context.args[:-2]).strip()
+
+    if not exercise or not sets_reps or weight is None:
+        await update.message.reply_text(
+            "I couldn't parse that workout. Try /log bench press 3x5 185lbs"
+        )
+        return
+
+    try:
+        log_workout(
+            telegram_id=telegram_id,
+            exercise=exercise,
+            sets=sets_reps["sets"],
+            reps=sets_reps["reps"],
+            weight=weight,
+        )
+    except Exception as e:
+        logger.error(f"Failed to log workout for {telegram_id}: {e}")
+        await update.message.reply_text("Failed to save that workout. Try again in a moment.")
+        return
+
+    overload = None
+    try:
+        history = get_workout_history(telegram_id, limit=6) or []
+        overload = check_progressive_overload(history, exercise)
+    except Exception as e:
+        logger.error(f"Failed to evaluate progressive overload for {telegram_id}: {e}")
+
+    reply_lines = [
+        "Logged workout:",
+        "",
+        format_workout_log(exercise, sets_reps["sets"], sets_reps["reps"], weight),
+    ]
+    if overload:
+        suggested_weight = overload.get("suggested_weight")
+        if suggested_weight is not None:
+            suggested_weight = float(suggested_weight)
+            if suggested_weight.is_integer():
+                suggested_weight = int(suggested_weight)
+        reply_lines.extend(
+            [
+                "",
+                f"Next time: aim for {suggested_weight} lbs if execution stays solid.",
+                overload.get("reason", ""),
+            ]
+        )
+
+    await update.message.reply_text("\n".join(line for line in reply_lines if line != ""))
+
+
+def _parse_weight_token(token: str) -> float | None:
+    match = re.search(r"\d+(?:\.\d+)?", token)
+    if not match:
+        return None
+    return float(match.group(0))
+
+
+async def profile_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle the /profile command — view or update user profile fields."""
+    telegram_id = update.effective_user.id
+    logger.info(f"/profile from user {telegram_id}")
+    _ensure_user_record(update.effective_user)
+
+    try:
+        existing_profile = get_user_profile(telegram_id) or {}
+    except Exception as e:
+        logger.error(f"Failed to fetch user profile for {telegram_id}: {e}")
+        existing_profile = {}
+
+    if not context.args:
+        await update.message.reply_text(_format_profile(existing_profile))
+        return
+
+    updates = {}
+    invalid_args = []
+    for arg in context.args:
+        if "=" not in arg:
+            invalid_args.append(arg)
+            continue
+
+        raw_key, raw_value = arg.split("=", 1)
+        field = PROFILE_FIELD_ALIASES.get(raw_key.lower())
+        if field is None:
+            invalid_args.append(arg)
+            continue
+
+        try:
+            updates[field] = _coerce_profile_value(field, raw_value)
+        except ValueError:
+            invalid_args.append(arg)
+
+    if invalid_args:
+        await update.message.reply_text(
+            "Couldn't parse these fields: "
+            + ", ".join(invalid_args)
+            + "\n\nUse /profile sex=male age=32 height_cm=178 goal=fat_loss experience=intermediate days=4 activity=1.55"
+        )
+        return
+
+    merged_profile = {
+        **existing_profile,
+        **updates,
+    }
+
+    try:
+        upsert_user_profile(telegram_id, merged_profile)
+        refreshed_context = await build_user_context(
+            telegram_id=telegram_id,
+            username=update.effective_user.username or update.effective_user.first_name,
+            refresh_nutrition=True,
+        )
+    except Exception as e:
+        logger.error(f"Failed to update user profile for {telegram_id}: {e}")
+        await update.message.reply_text("Failed to update your profile. Try again in a moment.")
+        return
+
+    reply_lines = ["Profile updated.", "", _format_profile(merged_profile)]
+    nutrition_state = refreshed_context.get("nutrition_state")
+    if nutrition_state:
+        reply_lines.extend(
+            [
+                "",
+                f"Nutrition phase: {nutrition_state.get('phase', 'N/A')}",
+                f"Calorie target: {nutrition_state.get('calorie_target', nutrition_state.get('current_calorie_target', 'N/A'))} kcal",
+                f"Protein target: {nutrition_state.get('protein_target_g', nutrition_state.get('current_protein_target_g', 'N/A'))} g",
+            ]
+        )
+
+    await update.message.reply_text("\n".join(reply_lines))
 
 
 async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -576,6 +1145,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_message = update.message.text
     logger.info(f"Message from {user.id}: {user_message[:50]}...")
+    _ensure_user_record(user)
 
     # Build live user context for the coaching agent
     user_context = await build_user_context(
@@ -584,6 +1154,16 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     response = await get_coaching_response(user_message, user_context)
+
+    try:
+        store_chat_message(user.id, "user", user_message)
+    except Exception as e:
+        logger.error(f"Failed to store user chat message for {user.id}: {e}")
+
+    try:
+        store_chat_message(user.id, "assistant", response)
+    except Exception as e:
+        logger.error(f"Failed to store assistant chat message for {user.id}: {e}")
 
     # Try Markdown first, fall back to plain text if Telegram rejects the formatting
     try:

@@ -9,12 +9,22 @@ from __future__ import annotations
 
 import httpx
 
+from coaching.nutrition import build_nutrition_targets, phase_from_goal
+from coaching.training import build_training_guidance
 from core.database import (
+    get_recent_chat_history,
+    get_nutrition_state,
+    get_recent_recovery_statuses,
+    get_user_profile,
     get_whoop_tokens,
     get_withings_tokens,
     get_workout_history,
+    store_body_metrics,
+    store_nutrition_state,
     store_whoop_tokens,
+    store_whoop_snapshot,
     store_withings_tokens,
+    upsert_user_profile,
 )
 from integrations.whoop import (
     WhoopClient,
@@ -26,6 +36,90 @@ from integrations.withings import get_latest_measurements, refresh_withings_toke
 from utils.logger import setup_logger
 
 logger = setup_logger("milo.user_context")
+
+
+def _ms_to_hours(ms: int | None) -> float | None:
+    if ms is None:
+        return None
+    return round(ms / 3_600_000, 2)
+
+
+def _build_whoop_summary(whoop_data: dict | None) -> dict | None:
+    if not whoop_data:
+        return None
+
+    recovery = whoop_data.get("recovery") or {}
+    sleep = whoop_data.get("sleep") or {}
+    cycles = whoop_data.get("cycles") or {}
+    body = whoop_data.get("body") or {}
+
+    total_in_bed_ms = sleep.get("total_in_bed_ms")
+    total_awake_ms = sleep.get("total_awake_ms") or 0
+    sleep_duration_hrs = None
+    if total_in_bed_ms is not None:
+        sleep_duration_hrs = _ms_to_hours(max(total_in_bed_ms - total_awake_ms, 0))
+
+    return {
+        "recovery_score": recovery.get("recovery_score"),
+        "hrv": recovery.get("hrv"),
+        "resting_hr": recovery.get("resting_hr"),
+        "spo2": recovery.get("spo2"),
+        "skin_temp": recovery.get("skin_temp"),
+        "sleep_performance_pct": sleep.get("sleep_performance_pct"),
+        "sleep_efficiency_pct": sleep.get("sleep_efficiency_pct"),
+        "sleep_duration_hrs": sleep_duration_hrs,
+        "respiratory_rate": sleep.get("respiratory_rate"),
+        "strain": cycles.get("strain"),
+        "calories_burned": cycles.get("calories_burned"),
+        "weight_lbs": body.get("weight_lbs"),
+        "weight_kg": body.get("weight_kg"),
+        "max_heart_rate": body.get("max_heart_rate"),
+    }
+
+
+def _maybe_initialize_nutrition_state(
+    profile: dict | None,
+    nutrition_state: dict | None,
+    withings_data: dict | None,
+    force_refresh: bool = False,
+) -> dict | None:
+    if nutrition_state and not force_refresh:
+        return nutrition_state
+    if not profile:
+        return None
+
+    body_weight_lbs = None
+    if withings_data:
+        body_weight_lbs = withings_data.get("weight_lbs")
+    if body_weight_lbs is None:
+        body_weight_lbs = profile.get("body_weight_lbs")
+
+    if body_weight_lbs is None:
+        return None
+
+    sex = profile.get("sex")
+    age_years = profile.get("age_years")
+    height_cm = profile.get("height_cm")
+    if sex is None or age_years is None or height_cm is None:
+        return None
+
+    nutrition_state = build_nutrition_targets(
+        body_weight=body_weight_lbs,
+        height_cm=float(height_cm),
+        age_years=int(age_years),
+        sex=str(sex),
+        phase=phase_from_goal(profile.get("primary_goal")),
+        activity_multiplier=float(profile.get("activity_multiplier") or 1.55),
+        unit="lbs",
+        experience_level=str(profile.get("experience_level") or "intermediate"),
+    )
+    nutrition_state["nutrition_mode"] = profile.get("nutrition_mode") or "tracked"
+    store_nutrition_state(
+        profile["user_id"],
+        nutrition_state,
+        reason_code="profile_refresh" if force_refresh else "profile_bootstrap",
+    )
+    return nutrition_state
 
 
 async def _fetch_whoop_recovery(telegram_id: int, whoop: WhoopClient, access_token: str) -> dict | None:
@@ -236,21 +330,51 @@ async def _fetch_withings_data(telegram_id: int) -> dict | None:
         return None
 
     return {
+        "weight_lbs": measurements.get("weight_lbs"),
+        "body_fat_pct": measurements.get("fat_ratio"),
+        "muscle_mass_lbs": None,
         "weight": measurements.get("weight_lbs"),
         "body_fat": measurements.get("fat_ratio"),
-        "muscle_mass": None,  # not currently available
+        "muscle_mass": None,
     }
 
 
-async def build_user_context(telegram_id: int, username: str) -> dict:
+async def build_user_context(telegram_id: int, username: str, refresh_nutrition: bool = False) -> dict:
     """Build complete user context for the coaching agent."""
     context = {
         "telegram_id": telegram_id,
         "username": username,
+        "chat_history": [],
+        "recovery_status": None,
+        "user_profile": None,
+        "nutrition_state": None,
+        "training_guidance": None,
         "whoop_data": None,
+        "whoop_summary": None,
         "withings_data": None,
         "workout_history": [],
     }
+
+    try:
+        context["user_profile"] = get_user_profile(telegram_id)
+    except Exception as e:
+        logger.error(f"Failed to fetch user profile for {telegram_id}: {e}")
+
+    try:
+        context["chat_history"] = get_recent_chat_history(telegram_id, limit=6)
+    except Exception as e:
+        logger.error(f"Failed to fetch chat history for {telegram_id}: {e}")
+
+    try:
+        context["nutrition_state"] = get_nutrition_state(telegram_id)
+    except Exception as e:
+        logger.error(f"Failed to fetch nutrition state for {telegram_id}: {e}")
+
+    try:
+        recovery_statuses = get_recent_recovery_statuses(telegram_id, limit=1)
+        context["recovery_status"] = recovery_statuses[0] if recovery_statuses else None
+    except Exception as e:
+        logger.error(f"Failed to fetch recovery status for {telegram_id}: {e}")
 
     # workouts are local DB reads; non-fatal on failure
     try:
@@ -261,12 +385,49 @@ async def build_user_context(telegram_id: int, username: str) -> dict:
     # fetch external data independently so one failure doesn't block the other
     try:
         context["whoop_data"] = await _fetch_all_whoop_data(telegram_id)
+        context["whoop_summary"] = _build_whoop_summary(context["whoop_data"])
+        if context["whoop_summary"]:
+            store_whoop_snapshot(telegram_id, context["whoop_summary"])
     except Exception as e:
         logger.error(f"Failed to fetch Whoop data for {telegram_id}: {e}")
 
     try:
         context["withings_data"] = await _fetch_withings_data(telegram_id)
+        if context["withings_data"]:
+            store_body_metrics(telegram_id, context["withings_data"])
+            if context["user_profile"]:
+                merged_profile = {
+                    **context["user_profile"],
+                    "body_weight_lbs": context["withings_data"].get("weight_lbs"),
+                    "estimated_body_fat_pct": context["withings_data"].get("body_fat_pct"),
+                }
+                upsert_user_profile(telegram_id, merged_profile)
+                context["user_profile"] = merged_profile
     except Exception as e:
         logger.error(f"Failed to fetch Withings data for {telegram_id}: {e}")
+
+    try:
+        context["nutrition_state"] = _maybe_initialize_nutrition_state(
+            context.get("user_profile"),
+            context.get("nutrition_state"),
+            context.get("withings_data"),
+            force_refresh=refresh_nutrition,
+        ) or context.get("nutrition_state")
+    except Exception as e:
+        logger.error(f"Failed to initialize nutrition state for {telegram_id}: {e}")
+
+    try:
+        recovery_for_training = context.get("recovery_status")
+        if recovery_for_training is None and context.get("whoop_summary"):
+            recovery_for_training = {
+                "composite_score": context["whoop_summary"].get("recovery_score"),
+            }
+        context["training_guidance"] = build_training_guidance(
+            recovery_status=recovery_for_training,
+            workout_history=context.get("workout_history") or [],
+            experience_level=(context.get("user_profile") or {}).get("experience_level"),
+        )
+    except Exception as e:
+        logger.error(f"Failed to build training guidance for {telegram_id}: {e}")
 
     return context
