@@ -479,6 +479,17 @@ def _looks_under_18(text: str) -> bool:
     return any(phrase in text for phrase in ["under 18", "not 18", "i'm 17", "im 17", "i am 17", "17 years old", "16 years old", "15 years old"])
 
 
+def _extract_sex(text: str) -> str | None:
+    lowered = text.lower()
+    if any(word in lowered for word in ["male", "man", "guy", "dude", " m ", "\nm"]):
+        if any(word in lowered for word in ["female", "woman"]):
+            return None
+        return "male"
+    if any(word in lowered for word in ["female", "woman", "girl", "gal", " f ", "\nf"]):
+        return "female"
+    return None
+
+
 def _extract_age(text: str) -> int | None:
     patterns = [r"(\d{1,2})\s*(?:years? old|yo|y/o)", r"age\s*(\d{1,2})", r"i'?m\s*(\d{1,2})", r"i am\s*(\d{1,2})"]
     for pattern in patterns:
