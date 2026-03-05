@@ -1,6 +1,9 @@
 [build]
 builder = "nixpacks"
 
+[build.env]
+PYTHONUNBUFFERED = "1"
+
 [deploy]
 healthcheckPath = "/health"
 healthcheckTimeout = 300
