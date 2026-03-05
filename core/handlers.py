@@ -185,9 +185,17 @@ async def _reply_markdown(update: Update, text: str) -> None:
         await update.message.reply_text(text)
 
 
-async def _reply_sequence(update: Update, messages: list[str]) -> None:
+async def _reply_sequence(update: Update, messages) -> None:
+    from core.onboarding import OnboardingMessage
     for message in messages:
-        if message:
+        if not message:
+            continue
+        if isinstance(message, OnboardingMessage):
+            try:
+                await update.message.reply_text(message.text, parse_mode="Markdown", reply_markup=message.reply_markup)
+            except BadRequest:
+                await update.message.reply_text(message.text, reply_markup=message.reply_markup)
+        elif isinstance(message, str):
             await _reply_markdown(update, message)
 
 
@@ -1258,3 +1266,56 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Failed to store assistant chat message for {user.id}: {e}")
 
     await _reply_markdown(update, response)
+
+
+async def onboarding_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle inline button presses during onboarding (callback_data prefixed with 'ob:')."""
+    query = update.callback_query
+    await query.answer()
+
+    user = query.from_user
+    data = query.data
+    if not data or not data.startswith("ob:"):
+        return
+
+    button_value = data[3:]  # strip "ob:" prefix
+    logger.info(f"Onboarding button from {user.id}: {button_value}")
+    _ensure_user_record(user)
+
+    try:
+        onboarding_state = get_onboarding_state(user.id)
+    except Exception as e:
+        logger.error(f"Failed to fetch onboarding state for callback {user.id}: {e}")
+        await query.message.reply_text("Something went wrong. Send any message to continue.")
+        return
+
+    try:
+        onboarding_messages = await process_onboarding_message(
+            telegram_id=user.id,
+            username=user.username or user.first_name or "there",
+            message_text=button_value,
+            onboarding_state=onboarding_state,
+        )
+    except Exception as e:
+        logger.error(f"Onboarding callback failed for {user.id}: {e}")
+        await query.message.reply_text("I hit a snag. Send any message to continue.")
+        return
+
+    from core.onboarding import OnboardingMessage
+    for message in onboarding_messages:
+        if not message:
+            continue
+        if isinstance(message, OnboardingMessage):
+            try:
+                await query.message.reply_text(message.text, parse_mode="Markdown", reply_markup=message.reply_markup)
+            except BadRequest:
+                await query.message.reply_text(message.text, reply_markup=message.reply_markup)
+        elif isinstance(message, str):
+            await _reply_markdown_msg(query.message, message)
+
+
+async def _reply_markdown_msg(message, text: str) -> None:
+    try:
+        await message.reply_text(text, parse_mode="Markdown")
+    except BadRequest:
+        await message.reply_text(text)

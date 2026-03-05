@@ -1,13 +1,60 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
+
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from core.database import get_onboarding_state, upsert_onboarding_state, upsert_user_profile
 from core.user_context import build_user_context
 
 from agent import get_coaching_response
+
+
+@dataclass
+class OnboardingMessage:
+    """A message with optional inline keyboard buttons."""
+    text: str
+    buttons: list[list[tuple[str, str]]] = field(default_factory=list)  # rows of (label, callback_data)
+
+    @property
+    def reply_markup(self) -> InlineKeyboardMarkup | None:
+        if not self.buttons:
+            return None
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton(label, callback_data=f"ob:{data}") for label, data in row]
+            for row in self.buttons
+        ])
+
+
+def _msg(text: str, buttons: list[list[tuple[str, str]]] | None = None) -> OnboardingMessage:
+    return OnboardingMessage(text=text, buttons=buttons or [])
+
+
+# Button presets for each step
+BUTTONS_WELCOME = [[("Yes, let's go", "yes")]]
+BUTTONS_MEDICAL_AGE = [[("Yes, 18+", "yes_18"), ("Under 18", "under_18")]]
+BUTTONS_MINOR_CLEARANCE = [[("Yes, confirmed", "yes")]]
+BUTTONS_GOAL = [
+    [("Get bigger", "muscle_gain"), ("Get leaner", "fat_loss")],
+    [("Both / recomp", "recomp"), ("Maintain", "maintain")],
+]
+BUTTONS_EQUIPMENT = [
+    [("Full gym", "full_gym"), ("Home gym", "home_gym"), ("Minimal", "minimal")],
+]
+BUTTONS_EMPHASIS = [
+    [("Balanced", "balanced"), ("Upper body", "upper")],
+    [("Lower body", "lower"), ("Arms", "arms")],
+]
+BUTTONS_NUTRITION = [[("Tracked", "tracked"), ("Habit-based", "habit")]]
+BUTTONS_WEARABLES = [
+    [("Whoop", "whoop"), ("Withings", "withings")],
+    [("Both", "both"), ("Neither", "neither")],
+]
+BUTTONS_COMMUNICATION = [[("Daily", "daily"), ("Training days", "training_days"), ("Weekly", "weekly")]]
+BUTTONS_CONFIRM = [[("Looks good", "yes"), ("Change something", "change")]]
 
 WELCOME_PROMPT = (
     "Hey! I'm Milo, your AI fitness coach. I'm going to help you build a training plan and dial in your nutrition — all over Telegram.\n\n"
@@ -220,7 +267,7 @@ def needs_onboarding(user_profile: dict | None, onboarding_state: dict | None) -
     return True
 
 
-def begin_or_resume_onboarding(telegram_id: int) -> list[str]:
+def begin_or_resume_onboarding(telegram_id: int) -> list[OnboardingMessage]:
     state = get_onboarding_state(telegram_id)
     if not state:
         upsert_onboarding_state(
@@ -230,13 +277,15 @@ def begin_or_resume_onboarding(telegram_id: int) -> list[str]:
             profile_data={},
             last_question=WELCOME_PROMPT,
         )
-        return [WELCOME_PROMPT]
+        return [_msg(WELCOME_PROMPT, BUTTONS_WELCOME)]
     if state.get("status") == "completed":
         return []
-    return [state.get("last_question") or _prompt_for_step(state.get("current_step"), state.get("profile_data") or {})]
+    step = state.get("current_step")
+    text = state.get("last_question") or _prompt_for_step(step, state.get("profile_data") or {})
+    return [_msg(text, STEP_BUTTONS.get(step))]
 
 
-async def process_onboarding_message(telegram_id: int, username: str, message_text: str, onboarding_state: dict | None = None) -> list[str]:
+async def process_onboarding_message(telegram_id: int, username: str, message_text: str, onboarding_state: dict | None = None) -> list[OnboardingMessage]:
     state = onboarding_state or get_onboarding_state(telegram_id) or {}
     step = state.get("current_step") or "welcome_ready"
     profile = dict(state.get("profile_data") or {})
@@ -246,16 +295,25 @@ async def process_onboarding_message(telegram_id: int, username: str, message_te
     if step not in ("welcome_ready", "medical_age", "minor_clearance") and _is_question(text):
         last_question = state.get("last_question")
         answer = await _answer_onboarding_question(telegram_id, username, text, step, last_question)
-        return [answer]
+        return [_msg(answer)]
 
     if step == "welcome_ready":
         if _is_affirmative(text):
             return _transition(telegram_id, profile, "medical_age", MEDICAL_PROMPT)
-        return ["Whenever you're ready, send me a quick yes and we'll get into it.", WELCOME_PROMPT]
+        return [_msg("Whenever you're ready, send me a quick yes and we'll get into it."), _msg(WELCOME_PROMPT, BUTTONS_WELCOME)]
 
     if step == "medical_age":
         age = _extract_age(text)
-        lowered = text.lower()
+        lowered = text.lower().strip()
+        # Handle button callbacks
+        if lowered == "yes_18" or lowered == "yes, 18+":
+            profile["medical_disclaimer_acknowledged"] = True
+            profile["age_under_18"] = False
+            return _transition(telegram_id, profile, "basics", _prompt_for_step("basics", profile), prefix="Great. Acknowledged — let's build something.")
+        if lowered == "under_18":
+            profile["medical_disclaimer_acknowledged"] = True
+            profile["age_under_18"] = True
+            return _transition(telegram_id, profile, "minor_clearance", MINOR_CLEARANCE_PROMPT)
         if age is not None:
             profile["age_years"] = age
             profile["medical_disclaimer_acknowledged"] = True
@@ -272,7 +330,7 @@ async def process_onboarding_message(telegram_id: int, username: str, message_te
             profile["medical_disclaimer_acknowledged"] = True
             profile["age_under_18"] = True
             return _transition(telegram_id, profile, "minor_clearance", MINOR_CLEARANCE_PROMPT)
-        return ["I just need to confirm the disclaimer and whether you're 18 or older.", MEDICAL_PROMPT]
+        return [_msg("I just need to confirm the disclaimer and whether you're 18 or older."), _msg(MEDICAL_PROMPT, BUTTONS_MEDICAL_AGE)]
 
     if step == "minor_clearance":
         if _is_affirmative(text):
@@ -280,7 +338,7 @@ async def process_onboarding_message(telegram_id: int, username: str, message_te
             profile["age_under_18"] = True
             return _transition(telegram_id, profile, "basics", _prompt_for_step("basics", profile), prefix="Got it. We'll keep volume and intensity conservative to start.")
         upsert_onboarding_state(telegram_id, status="paused", current_step="minor_clearance", profile_data=profile, last_question=MINOR_CLEARANCE_PROMPT)
-        return ["No worries — come back when you've had that conversation and I'll be here."]
+        return [_msg("No worries — come back when you've had that conversation and I'll be here.")]
 
     if step == "basics":
         profile.update(_extract_basics(text, profile))
@@ -294,7 +352,7 @@ async def process_onboarding_message(telegram_id: int, username: str, message_te
         if missing:
             prompt = _prompt_for_step("basics", profile)
             upsert_onboarding_state(telegram_id, current_step="basics", profile_data=profile, last_question=prompt)
-            return [f"I still need your {' and '.join(missing)}.", prompt]
+            return [_msg(f"I still need your {' and '.join(missing)}."), _msg(prompt)]
         return _transition(telegram_id, profile, "weight_bodyfat", WEIGHT_PROMPT)
 
     if step == "weight_bodyfat":
@@ -302,13 +360,13 @@ async def process_onboarding_message(telegram_id: int, username: str, message_te
         profile.update(body)
         if profile.get("body_weight_lbs") is None:
             upsert_onboarding_state(telegram_id, current_step="weight_bodyfat", profile_data=profile, last_question=WEIGHT_PROMPT)
-            return ["I still need your current body weight.", WEIGHT_PROMPT]
-        messages = []
+            return [_msg("I still need your current body weight."), _msg(WEIGHT_PROMPT)]
+        messages: list[OnboardingMessage] = []
         if body.get("body_fat_unknown"):
-            messages.append("No worries at all — most people don't know their exact BF%. I'll use a formula that doesn't need it for now. If you ever get a DEXA scan or InBody test, we can update your numbers and sharpen the calculations. For now we're good.")
+            messages.append(_msg("No worries at all — most people don't know their exact BF%. I'll use a formula that doesn't need it for now. If you ever get a DEXA scan or InBody test, we can update your numbers and sharpen the calculations. For now we're good."))
         elif profile.get("estimated_body_fat_pct") is None:
             upsert_onboarding_state(telegram_id, current_step="weight_bodyfat", profile_data=profile, last_question=WEIGHT_PROMPT)
-            return ["Tell me your body fat percentage if you know it, or just say you don't know.", WEIGHT_PROMPT]
+            return [_msg("Tell me your body fat percentage if you know it, or just say you don't know."), _msg(WEIGHT_PROMPT)]
         messages.extend(_transition(telegram_id, profile, "training_background", TRAINING_PROMPT))
         return messages
 
@@ -321,7 +379,7 @@ async def process_onboarding_message(telegram_id: int, username: str, message_te
             missing.append("whether you have any injuries")
         if missing:
             upsert_onboarding_state(telegram_id, current_step="training_background", profile_data=profile, last_question=TRAINING_PROMPT)
-            return [f"I still need {' and '.join(missing)}.", TRAINING_PROMPT]
+            return [_msg(f"I still need {' and '.join(missing)}."), _msg(TRAINING_PROMPT)]
         if profile.get("injury_notes"):
             return _transition(telegram_id, profile, "injury_followup", INJURY_FOLLOWUP_PROMPT)
         return _transition(telegram_id, profile, "goal_schedule", GOAL_PROMPT)
@@ -340,10 +398,10 @@ async def process_onboarding_message(telegram_id: int, username: str, message_te
             missing.append("training days per week")
         if missing:
             upsert_onboarding_state(telegram_id, current_step="goal_schedule", profile_data=profile, last_question=GOAL_PROMPT)
-            return [f"I still need {' and '.join(missing)}.", GOAL_PROMPT]
+            return [_msg(f"I still need {' and '.join(missing)}."), _msg(GOAL_PROMPT, BUTTONS_GOAL)]
         messages = []
         if profile.get("primary_goal") == "recomp":
-            messages.append("That makes total sense — most people want to look better and get stronger. The good news is those goals overlap a lot. For now, we'll treat this as a recomp starting point and tighten it up once I have your full picture.")
+            messages.append(_msg("That makes total sense — most people want to look better and get stronger. The good news is those goals overlap a lot. For now, we'll treat this as a recomp starting point and tighten it up once I have your full picture."))
         messages.extend(_transition(telegram_id, profile, "equipment", EQUIPMENT_PROMPT))
         return messages
 
@@ -356,7 +414,7 @@ async def process_onboarding_message(telegram_id: int, username: str, message_te
             missing.append("training emphasis")
         if missing:
             upsert_onboarding_state(telegram_id, current_step="equipment", profile_data=profile, last_question=EQUIPMENT_PROMPT)
-            return [f"I still need your {' and '.join(missing)}.", EQUIPMENT_PROMPT]
+            return [_msg(f"I still need your {' and '.join(missing)}."), _msg(EQUIPMENT_PROMPT, BUTTONS_EQUIPMENT)]
         return _transition(telegram_id, profile, "nutrition_mode", NUTRITION_PROMPT)
 
     if step == "nutrition_mode":
@@ -365,12 +423,12 @@ async def process_onboarding_message(telegram_id: int, username: str, message_te
         if mode is None and any(phrase in lowered for phrase in ["not sure", "unsure", "don't know", "dont know", "either one"]):
             upsert_onboarding_state(telegram_id, current_step="nutrition_mode", profile_data=profile, last_question=NUTRITION_PROMPT)
             return [
-                "If you're not sure, I'd suggest starting with the habit-based approach. It's lower friction and works really well. If you're not seeing progress after a few weeks, we can switch to tracked mode — it's easy to upgrade but harder to downgrade once you're burned out on counting.",
-                NUTRITION_PROMPT,
+                _msg("If you're not sure, I'd suggest starting with the habit-based approach. It's lower friction and works really well. If you're not seeing progress after a few weeks, we can switch to tracked mode — it's easy to upgrade but harder to downgrade once you're burned out on counting."),
+                _msg(NUTRITION_PROMPT, BUTTONS_NUTRITION),
             ]
         if mode is None:
             upsert_onboarding_state(telegram_id, current_step="nutrition_mode", profile_data=profile, last_question=NUTRITION_PROMPT)
-            return ["Tell me which sounds more like you: tracked or habit-based.", NUTRITION_PROMPT]
+            return [_msg("Tell me which sounds more like you: tracked or habit-based."), _msg(NUTRITION_PROMPT, BUTTONS_NUTRITION)]
         profile["nutrition_mode"] = mode
         return _transition(telegram_id, profile, "wearables", WEARABLES_PROMPT)
 
@@ -378,7 +436,7 @@ async def process_onboarding_message(telegram_id: int, username: str, message_te
         wearable_data = _extract_wearables(text)
         if not wearable_data:
             upsert_onboarding_state(telegram_id, current_step="wearables", profile_data=profile, last_question=WEARABLES_PROMPT)
-            return ["Just tell me Whoop, Withings, both, or neither.", WEARABLES_PROMPT]
+            return [_msg("Just tell me Whoop, Withings, both, or neither."), _msg(WEARABLES_PROMPT, BUTTONS_WEARABLES)]
         profile.update(wearable_data)
         prefix = "Once you connect those in the app, I'll be able to use your actual recovery and sleep data to guide training intensity. It won't change the fundamental program — it just lets me fine-tune things." if profile.get("uses_whoop") or profile.get("uses_withings") else "No worries — I'll use your self-reported readiness and training performance as my primary signals. Works fine."
         return _transition(telegram_id, profile, "communication", COMMUNICATION_PROMPT, prefix=prefix)
@@ -387,24 +445,26 @@ async def process_onboarding_message(telegram_id: int, username: str, message_te
         preference = _parse_communication_preference(text)
         if preference is None:
             upsert_onboarding_state(telegram_id, current_step="communication", profile_data=profile, last_question=COMMUNICATION_PROMPT)
-            return ["Give me a rough preference: daily, training days only, or weekly.", COMMUNICATION_PROMPT]
+            return [_msg("Give me a rough preference: daily, training days only, or weekly."), _msg(COMMUNICATION_PROMPT, BUTTONS_COMMUNICATION)]
         profile["communication_preference"] = preference
         summary = build_onboarding_summary(profile)
         upsert_onboarding_state(telegram_id, current_step="confirm_summary", profile_data=profile, last_question=summary)
-        return [summary]
+        return [_msg(summary, BUTTONS_CONFIRM)]
 
     if step == "confirm_summary":
         if _is_affirmative(text):
             return await _complete_onboarding(telegram_id, username, profile)
+        if text.strip().lower() == "change":
+            return [_msg("Tell me what you want to change and I'll adjust it before I build the plan."), _msg(build_onboarding_summary(profile), BUTTONS_CONFIRM)]
         updates = _extract_summary_updates(text, profile)
         if updates:
             profile.update(updates)
             summary = build_onboarding_summary(profile)
             upsert_onboarding_state(telegram_id, current_step="confirm_summary", profile_data=profile, last_question=summary)
-            return ["Got it. Updated.", summary]
-        return ["Tell me what you want to change and I'll adjust it before I build the plan.", build_onboarding_summary(profile)]
+            return [_msg("Got it. Updated."), _msg(summary, BUTTONS_CONFIRM)]
+        return [_msg("Tell me what you want to change and I'll adjust it before I build the plan."), _msg(build_onboarding_summary(profile), BUTTONS_CONFIRM)]
 
-    return [WELCOME_PROMPT]
+    return [_msg(WELCOME_PROMPT, BUTTONS_WELCOME)]
 
 
 def build_onboarding_summary(profile: dict[str, Any]) -> str:
@@ -429,7 +489,7 @@ def build_onboarding_summary(profile: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-async def _complete_onboarding(telegram_id: int, username: str, profile: dict[str, Any]) -> list[str]:
+async def _complete_onboarding(telegram_id: int, username: str, profile: dict[str, Any]) -> list[OnboardingMessage]:
     now_iso = datetime.now(timezone.utc).isoformat()
     profile = {**profile}
     profile.setdefault("experience_level", _derive_experience_level(profile.get("training_age_months")))
@@ -441,16 +501,33 @@ async def _complete_onboarding(telegram_id: int, username: str, profile: dict[st
     user_context = await build_user_context(telegram_id=telegram_id, username=username, refresh_nutrition=True)
     nutrition = user_context.get("nutrition_state") or {}
     return [
-        "Perfect. Give me a moment and I'll put together your initial training plan and nutrition setup.",
-        _build_nutrition_message(profile, nutrition),
-        _build_training_message(profile),
-        _build_next_steps_message(profile),
+        _msg("Perfect. Give me a moment and I'll put together your initial training plan and nutrition setup."),
+        _msg(_build_nutrition_message(profile, nutrition)),
+        _msg(_build_training_message(profile)),
+        _msg(_build_next_steps_message(profile)),
     ]
 
 
-def _transition(telegram_id: int, profile: dict[str, Any], next_step: str, prompt: str, prefix: str | None = None) -> list[str]:
+STEP_BUTTONS = {
+    "welcome_ready": BUTTONS_WELCOME,
+    "medical_age": BUTTONS_MEDICAL_AGE,
+    "minor_clearance": BUTTONS_MINOR_CLEARANCE,
+    "goal_schedule": BUTTONS_GOAL,
+    "equipment": BUTTONS_EQUIPMENT,
+    "nutrition_mode": BUTTONS_NUTRITION,
+    "wearables": BUTTONS_WEARABLES,
+    "communication": BUTTONS_COMMUNICATION,
+    "confirm_summary": BUTTONS_CONFIRM,
+}
+
+
+def _transition(telegram_id: int, profile: dict[str, Any], next_step: str, prompt: str, prefix: str | None = None) -> list[OnboardingMessage]:
     upsert_onboarding_state(telegram_id, status="in_progress", current_step=next_step, profile_data=profile, last_question=prompt)
-    return [message for message in [prefix, prompt] if message]
+    messages: list[OnboardingMessage] = []
+    if prefix:
+        messages.append(_msg(prefix))
+    messages.append(_msg(prompt, STEP_BUTTONS.get(next_step)))
+    return messages
 
 
 def _prompt_for_step(step: str | None, profile: dict[str, Any]) -> str:
@@ -637,8 +714,12 @@ def _extract_basics(text: str, profile: dict[str, Any]) -> dict[str, Any]:
 
 
 def _extract_goal_schedule(text: str) -> dict[str, Any]:
-    lowered = text.lower()
+    lowered = text.lower().strip()
     result: dict[str, Any] = {}
+    # Exact matches for button callback values
+    if lowered in ("muscle_gain", "fat_loss", "recomp", "maintain"):
+        result["primary_goal"] = lowered
+        return result
     if any(word in lowered for word in ["both", "recomp", "recomposition", "leaner and stronger", "stronger and leaner", "build muscle and lose fat", "aesthetic", "aesthetics"]):
         result["primary_goal"] = "recomp"
     elif any(word in lowered for word in ["fat loss", "lose fat", "lean", "cut", "get leaner"]):
@@ -658,8 +739,16 @@ def _extract_goal_schedule(text: str) -> dict[str, Any]:
 
 
 def _extract_equipment(text: str) -> dict[str, Any]:
-    lowered = text.lower()
+    lowered = text.lower().strip()
     result: dict[str, Any] = {}
+    # Exact matches for button callback values
+    if lowered in ("full_gym", "home_gym", "minimal"):
+        result["equipment_access"] = lowered
+        result["emphasis_preference"] = "balanced"
+        return result
+    if lowered in ("balanced", "upper", "lower", "arms"):
+        result["emphasis_preference"] = lowered
+        return result
     if any(word in lowered for word in ["home gym", "garage", "rack", "barbell at home", "home setup"]):
         result["equipment_access"] = "home_gym"
     elif any(word in lowered for word in ["minimal", "bodyweight", "bands", "dumbbells only", "hotel gym", "apartment"]):
@@ -676,13 +765,17 @@ def _extract_equipment(text: str) -> dict[str, Any]:
     elif any(word in lowered for word in ["arms", "biceps", "triceps"]):
         result["emphasis_preference"] = "arms"
     else:
-        # Default to balanced — most users don't have a strong preference
         result["emphasis_preference"] = "balanced"
     return result
 
 
 def _parse_nutrition_mode(text: str) -> str | None:
-    lowered = text.lower()
+    lowered = text.lower().strip()
+    # Exact matches for button callback values
+    if lowered == "habit":
+        return "ad_libitum"
+    if lowered == "tracked":
+        return "tracked"
     if any(word in lowered for word in ["habit", "habit-based", "ad libitum", "no tracking", "don't want to track", "dont want to track"]):
         return "ad_libitum"
     if any(word in lowered for word in ["tracked", "track", "logging", "log food", "calories", "macros"]):
@@ -691,9 +784,16 @@ def _parse_nutrition_mode(text: str) -> str | None:
 
 
 def _extract_wearables(text: str) -> dict[str, Any]:
-    lowered = text.lower()
-    if "both" in lowered:
+    lowered = text.lower().strip()
+    # Exact matches for button callback values
+    if lowered == "both":
         return {"uses_whoop": True, "uses_withings": True}
+    if lowered == "whoop":
+        return {"uses_whoop": True, "uses_withings": False}
+    if lowered == "withings":
+        return {"uses_whoop": False, "uses_withings": True}
+    if lowered == "neither":
+        return {"uses_whoop": False, "uses_withings": False}
     negative_whoop = any(phrase in lowered for phrase in ["no whoop", "not whoop", "don't have whoop", "dont have whoop", "without whoop"])
     negative_withings = any(phrase in lowered for phrase in ["no withings", "not withings", "don't have withings", "dont have withings", "without withings"])
     has_whoop = "whoop" in lowered and not negative_whoop
@@ -706,7 +806,12 @@ def _extract_wearables(text: str) -> dict[str, Any]:
 
 
 def _parse_communication_preference(text: str) -> str | None:
-    lowered = text.lower()
+    lowered = text.lower().strip()
+    # Exact matches for button callback values
+    if lowered == "training_days":
+        return "training_days_only"
+    if lowered in ("daily", "weekly"):
+        return lowered
     if "daily" in lowered or "every day" in lowered:
         return "daily"
     if any(word in lowered for word in ["few times", "couple times", "training days", "workout days"]):

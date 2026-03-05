@@ -23,7 +23,7 @@ import signal
 
 from aiohttp import web
 from dotenv import load_dotenv
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters
+from telegram.ext import ApplicationBuilder, CallbackQueryHandler, CommandHandler, MessageHandler, filters
 
 from core.handlers import (
     start_handler,
@@ -38,6 +38,7 @@ from core.handlers import (
     log_handler,
     help_handler,
     message_handler,
+    onboarding_callback_handler,
 )
 from core.oauth_server import create_web_app, set_bot
 from core.scheduler import start_scheduler
@@ -72,6 +73,9 @@ async def main():
     tg_app.add_handler(CommandHandler("log", log_handler))
     tg_app.add_handler(CommandHandler("profile", profile_handler))
     tg_app.add_handler(CommandHandler("help", help_handler))
+
+    # Inline button callback handler (onboarding buttons)
+    tg_app.add_handler(CallbackQueryHandler(onboarding_callback_handler, pattern=r"^ob:"))
 
     # Conversational handler — routes all other text to the AI agent
     tg_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
