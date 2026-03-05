@@ -469,41 +469,76 @@ async def workout_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def body_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle the /body command — show Whoop body measurements."""
+    """Handle the /body command — show Withings body data with Whoop supplemental."""
+    from integrations.withings import get_latest_measurements, refresh_withings_token
+    from core.database import store_withings_tokens
+
     telegram_id = update.effective_user.id
     logger.info(f"/body from user {telegram_id}")
 
-    result = await _get_whoop_access(telegram_id, update)
-    if not result:
-        return
-    whoop, access_token = result
+    lines = ["\U0001f4cf *Body Measurements*", ""]
 
+    # --- Withings (primary: weight, body fat) ---
     try:
-        body_data = await _whoop_api_call(whoop, access_token, telegram_id, whoop.get_body_measurements)
-        await whoop.close()
-
-        height_m = body_data.get("height_meter")
-        weight_kg = body_data.get("weight_kilogram")
-        max_hr = body_data.get("max_heart_rate")
-
-        lines = ["\U0001f4cf *Body Measurements*", ""]
-        if height_m is not None:
-            feet = round(height_m * 3.28084, 1)
-            lines.append(f"Height: {feet} ft ({height_m:.2f}m)")
-        if weight_kg is not None:
-            lbs = round(weight_kg * 2.20462, 1)
-            lines.append(f"Weight: {lbs} lbs ({weight_kg:.1f} kg)")
-        if max_hr is not None:
-            lines.append(f"Max heart rate: {max_hr:.0f} bpm")
-
-        if len(lines) == 2:
-            await update.message.reply_text("No body measurement data available.")
-        else:
-            await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
-
+        withings_tokens = get_withings_tokens(telegram_id)
     except Exception as e:
-        logger.error(f"/body failed for {telegram_id}: {e}")
-        await update.message.reply_text("Failed to fetch body data. Try again later.")
+        logger.error(f"Failed to fetch Withings tokens for {telegram_id}: {e}")
+        withings_tokens = None
+
+    if withings_tokens and withings_tokens.get("access_token"):
+        try:
+            try:
+                measurements = await get_latest_measurements(withings_tokens["access_token"])
+            except Exception as e:
+                if "invalid_token" in str(e) or "401" in str(e):
+                    logger.info(f"Withings token expired for {telegram_id}, refreshing...")
+                    new_tokens = await refresh_withings_token(withings_tokens["refresh_token"])
+                    store_withings_tokens(telegram_id, new_tokens)
+                    measurements = await get_latest_measurements(new_tokens["access_token"])
+                else:
+                    raise
+
+            weight = measurements.get("weight_lbs")
+            fat = measurements.get("fat_ratio")
+
+            if weight is not None:
+                lines.append(f"\u2696\ufe0f Weight: {weight} lbs")
+            if fat is not None:
+                lines.append(f"\U0001f4ca Body fat: {fat}%")
+        except Exception as e:
+            logger.error(f"Withings body fetch failed for {telegram_id}: {e}")
+
+    # --- Whoop (supplemental: height, max HR) ---
+    try:
+        whoop_tokens = get_whoop_tokens(telegram_id)
+    except Exception as e:
+        logger.error(f"Failed to fetch Whoop tokens for {telegram_id}: {e}")
+        whoop_tokens = None
+
+    if whoop_tokens and whoop_tokens.get("access_token"):
+        whoop = WhoopClient()
+        try:
+            body_data = await _whoop_api_call(whoop, whoop_tokens["access_token"], telegram_id, whoop.get_body_measurements)
+            height_m = body_data.get("height_meter")
+            max_hr = body_data.get("max_heart_rate")
+
+            if height_m is not None:
+                feet = round(height_m * 3.28084, 1)
+                lines.append(f"\U0001f4cf Height: {feet} ft ({height_m:.2f}m)")
+            if max_hr is not None:
+                lines.append(f"\u2764\ufe0f Max heart rate: {max_hr:.0f} bpm")
+        except Exception as e:
+            logger.error(f"Whoop body fetch failed for {telegram_id}: {e}")
+        finally:
+            await whoop.close()
+
+    if len(lines) == 2:
+        if not withings_tokens and not whoop_tokens:
+            await update.message.reply_text("No devices connected. Use /connect to get started.")
+        else:
+            await update.message.reply_text("No body measurement data available.")
+    else:
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
 async def progress_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
