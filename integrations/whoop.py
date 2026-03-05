@@ -129,7 +129,7 @@ class WhoopClient:
             JSON response with cycle data including strain, heart rate, kilojoules.
         """
         response = await self.http.get(
-            f"{WHOOP_API_BASE}/cycles",
+            f"{WHOOP_API_BASE}/cycle",
             headers={"Authorization": f"Bearer {access_token}"},
             params={"limit": limit},
         )
@@ -164,7 +164,7 @@ class WhoopClient:
             JSON response with height, weight, max heart rate.
         """
         response = await self.http.get(
-            f"{WHOOP_API_BASE}/user/body/measurements",
+            f"{WHOOP_API_BASE}/user/measurement/body",
             headers={"Authorization": f"Bearer {access_token}"},
         )
         response.raise_for_status()

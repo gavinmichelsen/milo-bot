@@ -273,7 +273,7 @@ def log_workout(telegram_id: int, exercise: str, sets: int, reps: int, weight: f
         result = (
             client.table("workouts")
             .insert({
-                "telegram_id": telegram_id,
+                "user_id": telegram_id,
                 "exercise": exercise,
                 "sets": sets,
                 "reps": reps,
@@ -293,7 +293,7 @@ def get_workout_history(telegram_id: int, limit: int = 10) -> list:
         result = (
             client.table("workouts")
             .select("*")
-            .eq("telegram_id", telegram_id)
+            .eq("user_id", telegram_id)
             .order("created_at", desc=True)
             .limit(limit)
             .execute()
