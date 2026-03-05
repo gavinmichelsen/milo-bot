@@ -29,6 +29,10 @@ from core.handlers import (
     start_handler,
     connect_handler,
     stats_handler,
+    sleep_handler,
+    strain_handler,
+    workout_handler,
+    body_handler,
     progress_handler,
     log_handler,
     help_handler,
@@ -59,6 +63,10 @@ async def main():
     tg_app.add_handler(CommandHandler("start", start_handler))
     tg_app.add_handler(CommandHandler("connect", connect_handler))
     tg_app.add_handler(CommandHandler("stats", stats_handler))
+    tg_app.add_handler(CommandHandler("sleep", sleep_handler))
+    tg_app.add_handler(CommandHandler("strain", strain_handler))
+    tg_app.add_handler(CommandHandler("workout", workout_handler))
+    tg_app.add_handler(CommandHandler("body", body_handler))
     tg_app.add_handler(CommandHandler("progress", progress_handler))
     tg_app.add_handler(CommandHandler("log", log_handler))
     tg_app.add_handler(CommandHandler("help", help_handler))

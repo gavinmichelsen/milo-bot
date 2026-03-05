@@ -8,15 +8,16 @@ to the Claude agent for AI coaching responses.
 
 import os
 
+import httpx
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
 from agent import get_coaching_response
-from core.database import upsert_user, get_whoop_tokens, get_withings_tokens
+from core.database import upsert_user, get_whoop_tokens, get_withings_tokens, store_whoop_tokens
 from core.oauth_state import create_state
 from core.user_context import build_user_context
-from integrations.whoop import WhoopClient
+from integrations.whoop import WhoopClient, refresh_whoop_token, kilojoules_to_calories
 from utils.logger import setup_logger
 
 logger = setup_logger("milo.handlers")
@@ -44,7 +45,11 @@ HELP_MESSAGE = """
 
 /start — Meet Milo and get started
 /connect — Connect Whoop and Withings devices
-/stats — View your latest health and body metrics
+/stats — Full health dashboard (recovery, sleep, strain, body)
+/sleep — Detailed sleep breakdown
+/strain — Daily strain and calorie burn
+/workout — Latest workout details
+/body — Body measurements
 /progress — See your progress over time
 /log — Log a workout (e.g. `bench press 3x5 185lbs`)
 /help — Show this help message
@@ -111,15 +116,16 @@ async def connect_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def stats_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle the /stats command — fetch and display Whoop + Withings data."""
-    from integrations.withings import get_latest_measurements
+    """Handle the /stats command — full health dashboard."""
+    from integrations.withings import get_latest_measurements, refresh_withings_token
+    from core.database import store_withings_tokens
 
     telegram_id = update.effective_user.id
     logger.info(f"/stats from user {telegram_id}")
 
-    lines = []
+    lines = ["\U0001f4ca *Health Dashboard*", ""]
 
-    # --- Whoop recovery data ---
+    # --- Whoop data ---
     try:
         whoop_tokens = get_whoop_tokens(telegram_id)
     except Exception as e:
@@ -127,46 +133,73 @@ async def stats_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         whoop_tokens = None
 
     if whoop_tokens and whoop_tokens.get("access_token"):
+        whoop = WhoopClient()
+        access_token = whoop_tokens["access_token"]
+
         try:
-            whoop = WhoopClient()
+            # Recovery
             try:
-                recovery_data = await whoop.get_recovery(whoop_tokens["access_token"])
-            except httpx.HTTPStatusError as e:
-                if e.response.status_code == 401:
-                    # Token expired — refresh and retry once
-                    logger.info(f"Whoop 401 for {telegram_id}, refreshing token...")
-                    try:
-                        from integrations.whoop import refresh_whoop_token
-                        from core.database import store_whoop_tokens
-                        new_tokens = await refresh_whoop_token(whoop_tokens["refresh_token"])
-                        store_whoop_tokens(telegram_id, new_tokens)
-                        recovery_data = await whoop.get_recovery(new_tokens["access_token"])
-                    except Exception as refresh_error:
-                        logger.error(f"Token refresh failed for {telegram_id}: {refresh_error}")
-                        await whoop.close()
-                        await update.message.reply_text(
-                            "Your Whoop connection has expired. Please use /connect to reconnect."
-                        )
-                        return
-                else:
-                    raise
-            await whoop.close()
+                recovery_data = await _whoop_api_call(whoop, access_token, telegram_id, whoop.get_recovery)
+                records = recovery_data.get("records", [])
+                if records:
+                    score = records[0].get("score", {})
+                    recovery_score = score.get("recovery_score")
+                    hrv = score.get("hrv_rmssd_milli")
+                    resting_hr = score.get("resting_heart_rate")
 
-            records = recovery_data.get("records", [])
-            if records:
-                score = records[0].get("score", {})
-                recovery_score = score.get("recovery_score")
-                hrv = score.get("hrv_rmssd_milli")
-                resting_hr = score.get("resting_heart_rate")
+                    lines.append("*Recovery*")
+                    if recovery_score is not None:
+                        lines.append(f"  \U0001f7e2 Score: {recovery_score:.0f}%")
+                    if hrv is not None:
+                        lines.append(f"  \u2764\ufe0f HRV: {hrv:.0f}ms")
+                    if resting_hr is not None:
+                        lines.append(f"  \U0001f4a4 Resting HR: {resting_hr:.0f}bpm")
+                    lines.append("")
+            except Exception as e:
+                logger.error(f"Stats recovery fetch failed for {telegram_id}: {e}")
 
-                if recovery_score is not None:
-                    lines.append(f"\U0001f7e2 Recovery Score: {recovery_score:.0f}%")
-                if hrv is not None:
-                    lines.append(f"\u2764\ufe0f HRV: {hrv:.0f}ms")
-                if resting_hr is not None:
-                    lines.append(f"\U0001f4a4 Resting HR: {resting_hr:.0f}bpm")
+            # Sleep summary
+            try:
+                sleep_data = await _whoop_api_call(whoop, access_token, telegram_id, whoop.get_sleep)
+                records = sleep_data.get("records", [])
+                if records:
+                    score = records[0].get("score", {})
+                    perf = score.get("sleep_performance_percentage")
+                    stages = score.get("stage_summary", {})
+                    total_bed = stages.get("total_in_bed_time_milli")
+
+                    lines.append("*Sleep*")
+                    if perf is not None:
+                        lines.append(f"  Performance: {perf:.0f}%")
+                    if total_bed is not None:
+                        lines.append(f"  Time in bed: {_ms_to_hours_mins(total_bed)}")
+                    lines.append("")
+            except Exception as e:
+                logger.error(f"Stats sleep fetch failed for {telegram_id}: {e}")
+
+            # Strain summary
+            try:
+                cycles_data = await _whoop_api_call(whoop, access_token, telegram_id, whoop.get_cycles)
+                records = cycles_data.get("records", [])
+                if records:
+                    score = records[0].get("score", {})
+                    strain = score.get("strain")
+                    kj = score.get("kilojoule")
+                    calories = kilojoules_to_calories(kj) if kj else None
+
+                    lines.append("*Strain*")
+                    if strain is not None:
+                        lines.append(f"  \U0001f525 Score: {strain:.1f}")
+                    if calories is not None:
+                        lines.append(f"  Calories: {calories:.0f} cal")
+                    lines.append("")
+            except Exception as e:
+                logger.error(f"Stats strain fetch failed for {telegram_id}: {e}")
+
         except Exception as e:
-            logger.error(f"Whoop API call failed for {telegram_id}: {e}")
+            logger.error(f"Whoop API failed for {telegram_id}: {e}")
+        finally:
+            await whoop.close()
 
     # --- Withings body data ---
     try:
@@ -182,8 +215,6 @@ async def stats_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception as e:
                 if "invalid_token" in str(e) or "401" in str(e):
                     logger.info(f"Withings token expired for {telegram_id}, refreshing...")
-                    from integrations.withings import refresh_withings_token
-                    from core.database import store_withings_tokens
                     new_tokens = await refresh_withings_token(withings_tokens["refresh_token"])
                     store_withings_tokens(telegram_id, new_tokens)
                     measurements = await get_latest_measurements(new_tokens["access_token"])
@@ -193,16 +224,19 @@ async def stats_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             weight = measurements.get("weight_lbs")
             fat = measurements.get("fat_ratio")
 
-            if weight is not None:
-                lines.append(f"\u2696\ufe0f Weight: {weight} lbs")
-            if fat is not None:
-                lines.append(f"\U0001f4ca Body Fat: {fat}%")
+            if weight is not None or fat is not None:
+                lines.append("*Body*")
+                if weight is not None:
+                    lines.append(f"  \u2696\ufe0f Weight: {weight} lbs")
+                if fat is not None:
+                    lines.append(f"  Body fat: {fat}%")
         except Exception as e:
             logger.error(f"Withings API call failed for {telegram_id}: {e}")
 
     # --- Send response ---
-    if lines:
-        await update.message.reply_text("\n".join(lines))
+    if len(lines) > 2:
+        lines.append("\n_Use /sleep /strain /workout /body for details_")
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
     elif not whoop_tokens and not withings_tokens:
         await update.message.reply_text(
             "You haven't connected any devices yet. Use /connect to get started."
@@ -211,6 +245,265 @@ async def stats_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "No data available yet. Make sure you're wearing your devices."
         )
+
+
+def _ms_to_hours_mins(ms: int | None) -> str:
+    """Convert milliseconds to 'Xh Ym' format."""
+    if ms is None:
+        return "N/A"
+    total_mins = ms // 60000
+    hours = total_mins // 60
+    mins = total_mins % 60
+    return f"{hours}h {mins}m"
+
+
+async def _get_whoop_access(telegram_id: int, update: Update) -> tuple[WhoopClient, str] | None:
+    """Get a WhoopClient with a valid access token, refreshing if needed.
+
+    Returns (whoop_client, access_token) or None if not connected.
+    """
+    try:
+        whoop_tokens = get_whoop_tokens(telegram_id)
+    except Exception as e:
+        logger.error(f"Failed to fetch Whoop tokens for {telegram_id}: {e}")
+        return None
+
+    if not whoop_tokens or not whoop_tokens.get("access_token"):
+        await update.message.reply_text(
+            "Whoop not connected. Use /connect to link your Whoop."
+        )
+        return None
+
+    return WhoopClient(), whoop_tokens["access_token"]
+
+
+async def _whoop_api_call(whoop: WhoopClient, access_token: str, telegram_id: int, api_method, *args):
+    """Call a Whoop API method with automatic token refresh on 401."""
+    try:
+        return await api_method(access_token, *args)
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code != 401:
+            raise
+        logger.info(f"Whoop 401 for {telegram_id}, refreshing token...")
+        whoop_tokens = get_whoop_tokens(telegram_id)
+        new_tokens = await refresh_whoop_token(whoop_tokens["refresh_token"])
+        store_whoop_tokens(telegram_id, new_tokens)
+        return await api_method(new_tokens["access_token"], *args)
+
+
+async def sleep_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle the /sleep command — show detailed Whoop sleep data."""
+    telegram_id = update.effective_user.id
+    logger.info(f"/sleep from user {telegram_id}")
+
+    result = await _get_whoop_access(telegram_id, update)
+    if not result:
+        return
+    whoop, access_token = result
+
+    try:
+        sleep_data = await _whoop_api_call(whoop, access_token, telegram_id, whoop.get_sleep)
+        await whoop.close()
+
+        records = sleep_data.get("records", [])
+        if not records:
+            await update.message.reply_text("No sleep data available yet.")
+            return
+
+        score = records[0].get("score", {})
+        stages = score.get("stage_summary", {})
+        sleep_needed = score.get("sleep_needed", {})
+
+        perf = score.get("sleep_performance_percentage")
+        eff = score.get("sleep_efficiency_percentage")
+        resp_rate = score.get("respiratory_rate")
+
+        total_bed = stages.get("total_in_bed_time_milli")
+        awake = stages.get("total_awake_time_milli")
+        light = stages.get("total_light_sleep_time_milli")
+        deep = stages.get("total_slow_wave_sleep_time_milli")
+        rem = stages.get("total_rem_sleep_time_milli")
+        cycles = stages.get("sleep_cycle_count")
+        disturbances = stages.get("disturbance_count")
+
+        debt = sleep_needed.get("need_from_sleep_debt_milli")
+
+        lines = ["\U0001f4a4 *Sleep Report*", ""]
+        if perf is not None:
+            lines.append(f"Performance: *{perf:.0f}%*")
+        if eff is not None:
+            lines.append(f"Efficiency: *{eff:.0f}%*")
+        if total_bed is not None:
+            lines.append(f"Time in bed: {_ms_to_hours_mins(total_bed)}")
+        if awake is not None:
+            lines.append(f"Awake: {_ms_to_hours_mins(awake)}")
+
+        lines.append("")
+        lines.append("*Sleep Stages*")
+        if light is not None:
+            lines.append(f"  Light: {_ms_to_hours_mins(light)}")
+        if deep is not None:
+            lines.append(f"  Deep (SWS): {_ms_to_hours_mins(deep)}")
+        if rem is not None:
+            lines.append(f"  REM: {_ms_to_hours_mins(rem)}")
+        if cycles is not None:
+            lines.append(f"  Cycles: {cycles}")
+        if disturbances is not None:
+            lines.append(f"  Disturbances: {disturbances}")
+
+        if resp_rate is not None:
+            lines.append(f"\nRespiratory rate: {resp_rate:.1f} rpm")
+        if debt is not None and debt > 0:
+            lines.append(f"Sleep debt: {_ms_to_hours_mins(debt)}")
+
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+    except Exception as e:
+        logger.error(f"/sleep failed for {telegram_id}: {e}")
+        await update.message.reply_text("Failed to fetch sleep data. Try again later.")
+
+
+async def strain_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle the /strain command — show daily strain and calorie data."""
+    telegram_id = update.effective_user.id
+    logger.info(f"/strain from user {telegram_id}")
+
+    result = await _get_whoop_access(telegram_id, update)
+    if not result:
+        return
+    whoop, access_token = result
+
+    try:
+        cycles_data = await _whoop_api_call(whoop, access_token, telegram_id, whoop.get_cycles)
+        await whoop.close()
+
+        records = cycles_data.get("records", [])
+        if not records:
+            await update.message.reply_text("No strain data available yet.")
+            return
+
+        score = records[0].get("score", {})
+        strain = score.get("strain")
+        kj = score.get("kilojoule")
+        calories = kilojoules_to_calories(kj) if kj else None
+        avg_hr = score.get("average_heart_rate")
+        max_hr = score.get("max_heart_rate")
+
+        lines = ["\U0001f525 *Daily Strain*", ""]
+        if strain is not None:
+            lines.append(f"Strain: *{strain:.1f}*")
+        if calories is not None:
+            lines.append(f"Calories burned: {calories:.0f} cal")
+        if kj is not None:
+            lines.append(f"Kilojoules: {kj:.0f} kJ")
+        if avg_hr is not None:
+            lines.append(f"Avg heart rate: {avg_hr:.0f} bpm")
+        if max_hr is not None:
+            lines.append(f"Max heart rate: {max_hr:.0f} bpm")
+
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+    except Exception as e:
+        logger.error(f"/strain failed for {telegram_id}: {e}")
+        await update.message.reply_text("Failed to fetch strain data. Try again later.")
+
+
+async def workout_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle the /workout command — show latest Whoop workout details."""
+    telegram_id = update.effective_user.id
+    logger.info(f"/workout from user {telegram_id}")
+
+    result = await _get_whoop_access(telegram_id, update)
+    if not result:
+        return
+    whoop, access_token = result
+
+    try:
+        workout_data = await _whoop_api_call(whoop, access_token, telegram_id, whoop.get_workouts)
+        await whoop.close()
+
+        records = workout_data.get("records", [])
+        if not records:
+            await update.message.reply_text("No workout data available yet.")
+            return
+
+        record = records[0]
+        score = record.get("score", {})
+        strain = score.get("strain")
+        kj = score.get("kilojoule")
+        calories = kilojoules_to_calories(kj) if kj else None
+        avg_hr = score.get("average_heart_rate")
+        max_hr = score.get("max_heart_rate")
+        distance = score.get("distance_meter")
+        altitude = score.get("altitude_gain_meter")
+        zone_durations = score.get("zone_duration_milliseconds", {})
+
+        lines = ["\U0001f3cb\ufe0f *Latest Workout*", ""]
+        if strain is not None:
+            lines.append(f"Strain: *{strain:.1f}*")
+        if calories is not None:
+            lines.append(f"Calories: {calories:.0f} cal")
+        if avg_hr is not None:
+            lines.append(f"Avg HR: {avg_hr:.0f} bpm")
+        if max_hr is not None:
+            lines.append(f"Max HR: {max_hr:.0f} bpm")
+        if distance is not None and distance > 0:
+            lines.append(f"Distance: {distance:.0f}m")
+        if altitude is not None and altitude > 0:
+            lines.append(f"Altitude gain: {altitude:.0f}m")
+
+        if zone_durations:
+            lines.append("")
+            lines.append("*HR Zones*")
+            zone_names = ["Zone 1 (rest)", "Zone 2 (light)", "Zone 3 (moderate)", "Zone 4 (hard)", "Zone 5 (max)"]
+            for i, name in enumerate(zone_names):
+                zone_ms = zone_durations.get(str(i)) or zone_durations.get(i)
+                if zone_ms and zone_ms > 0:
+                    lines.append(f"  {name}: {_ms_to_hours_mins(zone_ms)}")
+
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+    except Exception as e:
+        logger.error(f"/workout failed for {telegram_id}: {e}")
+        await update.message.reply_text("Failed to fetch workout data. Try again later.")
+
+
+async def body_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle the /body command — show Whoop body measurements."""
+    telegram_id = update.effective_user.id
+    logger.info(f"/body from user {telegram_id}")
+
+    result = await _get_whoop_access(telegram_id, update)
+    if not result:
+        return
+    whoop, access_token = result
+
+    try:
+        body_data = await _whoop_api_call(whoop, access_token, telegram_id, whoop.get_body_measurements)
+        await whoop.close()
+
+        height_m = body_data.get("height_meter")
+        weight_kg = body_data.get("weight_kilogram")
+        max_hr = body_data.get("max_heart_rate")
+
+        lines = ["\U0001f4cf *Body Measurements*", ""]
+        if height_m is not None:
+            feet = round(height_m * 3.28084, 1)
+            lines.append(f"Height: {feet} ft ({height_m:.2f}m)")
+        if weight_kg is not None:
+            lbs = round(weight_kg * 2.20462, 1)
+            lines.append(f"Weight: {lbs} lbs ({weight_kg:.1f} kg)")
+        if max_hr is not None:
+            lines.append(f"Max heart rate: {max_hr:.0f} bpm")
+
+        if len(lines) == 2:
+            await update.message.reply_text("No body measurement data available.")
+        else:
+            await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+    except Exception as e:
+        logger.error(f"/body failed for {telegram_id}: {e}")
+        await update.message.reply_text("Failed to fetch body data. Try again later.")
 
 
 async def progress_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
