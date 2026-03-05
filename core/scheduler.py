@@ -15,9 +15,11 @@ from core.database import (
     get_all_users,
     get_nutrition_state,
     get_all_whoop_tokens,
+    get_onboarding_state,
     get_recent_body_metrics,
     get_recent_recovery_statuses,
     get_recent_whoop_snapshots,
+    get_user_profile,
     get_workout_history,
     store_recovery_daily_status,
 )
@@ -62,6 +64,15 @@ async def morning_checkin(bot=None):
         username = user.get("username") or user.get("first_name") or str(telegram_id)
 
         try:
+            user_profile = get_user_profile(telegram_id)
+            onboarding_state = get_onboarding_state(telegram_id)
+            if onboarding_state and onboarding_state.get("status") != "completed":
+                skipped += 1
+                continue
+            if user_profile and user_profile.get("onboarding_status") not in {None, "completed", "not_started"}:
+                skipped += 1
+                continue
+
             existing_statuses = get_recent_recovery_statuses(telegram_id, limit=3)
             if existing_statuses and existing_statuses[0].get("snapshot_date") == today_iso:
                 skipped += 1
@@ -123,6 +134,15 @@ async def weekly_progress_summary(bot=None):
             continue
 
         try:
+            user_profile = get_user_profile(telegram_id)
+            onboarding_state = get_onboarding_state(telegram_id)
+            if onboarding_state and onboarding_state.get("status") != "completed":
+                skipped += 1
+                continue
+            if user_profile and user_profile.get("onboarding_status") not in {None, "completed", "not_started"}:
+                skipped += 1
+                continue
+
             recovery_statuses = get_recent_recovery_statuses(telegram_id, limit=7)
             body_metrics = get_recent_body_metrics(telegram_id, limit=8)
             workouts = get_workout_history(telegram_id, limit=50)

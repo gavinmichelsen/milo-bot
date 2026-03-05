@@ -92,7 +92,6 @@ def _retry_on_dns_error(func, max_retries: int = 3):
 
 
 def get_user(telegram_id: int) -> Optional[dict]:
-    """Fetch a user profile by their Telegram ID."""
     def _query():
         client = get_supabase_client()
         result = (
@@ -130,6 +129,50 @@ def get_user_profile(telegram_id: int) -> Optional[dict]:
     return _retry_on_dns_error(_query)
 
 
+def get_onboarding_state(telegram_id: int) -> Optional[dict]:
+    def _query():
+        client = get_supabase_client()
+        result = (
+            client.table("onboarding_states")
+            .select("*")
+            .eq("user_id", telegram_id)
+            .execute()
+        )
+        if result.data:
+            return result.data[0]
+        return None
+    return _retry_on_dns_error(_query)
+
+
+def upsert_onboarding_state(
+    telegram_id: int,
+    *,
+    status: str | None = None,
+    current_step: str | None = None,
+    profile_data: dict[str, Any] | None = None,
+    last_question: str | None = None,
+    completed: bool = False,
+) -> None:
+    now_iso = datetime.now(timezone.utc).isoformat()
+    payload: dict[str, Any] = {
+        "user_id": telegram_id,
+        "updated_at": now_iso,
+    }
+    if status is not None:
+        payload["status"] = status
+    if current_step is not None:
+        payload["current_step"] = current_step
+    if profile_data is not None:
+        payload["profile_data"] = profile_data
+    if last_question is not None or completed:
+        payload["last_question"] = last_question
+    if completed:
+        payload["completed_at"] = now_iso
+
+    _postgrest_upsert("onboarding_states", payload, "user_id")
+    logger.info(f"Upserted onboarding state for telegram_id={telegram_id}")
+
+
 def upsert_user_profile(telegram_id: int, profile: dict) -> None:
     payload = {
         "user_id": telegram_id,
@@ -143,6 +186,20 @@ def upsert_user_profile(telegram_id: int, profile: dict) -> None:
         "experience_level": profile.get("experience_level"),
         "training_days_per_week": profile.get("training_days_per_week"),
         "nutrition_mode": profile.get("nutrition_mode"),
+        "training_age_months": profile.get("training_age_months"),
+        "injury_notes": profile.get("injury_notes"),
+        "injury_details": profile.get("injury_details"),
+        "injury_status": profile.get("injury_status"),
+        "equipment_access": profile.get("equipment_access"),
+        "emphasis_preference": profile.get("emphasis_preference"),
+        "communication_preference": profile.get("communication_preference"),
+        "age_under_18": profile.get("age_under_18"),
+        "medical_disclaimer_acknowledged": profile.get("medical_disclaimer_acknowledged"),
+        "medical_clearance_confirmed": profile.get("medical_clearance_confirmed"),
+        "uses_whoop": profile.get("uses_whoop"),
+        "uses_withings": profile.get("uses_withings"),
+        "onboarding_status": profile.get("onboarding_status"),
+        "onboarding_completed_at": profile.get("onboarding_completed_at"),
         "target_wake_time": profile.get("target_wake_time"),
         "target_bedtime": profile.get("target_bedtime"),
         "updated_at": datetime.now(timezone.utc).isoformat(),

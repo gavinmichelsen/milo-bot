@@ -20,6 +20,7 @@ from agent import get_coaching_response
 from coaching.training import build_training_guidance, check_progressive_overload, format_workout_log
 from coaching.progress import build_weekly_progress_summary
 from core.database import (
+    get_onboarding_state,
     get_nutrition_state,
     get_recent_body_metrics,
     get_recent_recovery_statuses,
@@ -36,6 +37,7 @@ from core.database import (
     upsert_user,
     upsert_user_profile,
 )
+from core.onboarding import begin_or_resume_onboarding, needs_onboarding, process_onboarding_message
 from core.oauth_state import create_state
 from core.user_context import build_user_context
 from integrations.whoop import WhoopClient, refresh_whoop_token, kilojoules_to_calories
@@ -176,6 +178,19 @@ def _ensure_user_record(user) -> None:
         logger.error(f"Failed to save user {user.id} to Supabase: {e}")
 
 
+async def _reply_markdown(update: Update, text: str) -> None:
+    try:
+        await update.message.reply_text(text, parse_mode="Markdown")
+    except BadRequest:
+        await update.message.reply_text(text)
+
+
+async def _reply_sequence(update: Update, messages: list[str]) -> None:
+    for message in messages:
+        if message:
+            await _reply_markdown(update, message)
+
+
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle the /start command — save the user to Supabase and send welcome message."""
     user = update.effective_user
@@ -183,7 +198,26 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     _ensure_user_record(user)
 
-    await update.message.reply_text(WELCOME_MESSAGE, parse_mode="Markdown")
+    try:
+        user_profile = get_user_profile(user.id)
+        onboarding_state = get_onboarding_state(user.id)
+    except Exception as e:
+        logger.error(f"Failed to fetch user onboarding context for {user.id}: {e}")
+        user_profile = None
+        onboarding_state = None
+
+    if needs_onboarding(user_profile, onboarding_state):
+        try:
+            onboarding_messages = begin_or_resume_onboarding(user.id)
+        except Exception as e:
+            logger.error(f"Onboarding flow failed for {user.id}: {e}")
+            await update.message.reply_text("I hit a snag while starting your onboarding. Send /start again and I'll keep going.")
+            return
+
+        await _reply_sequence(update, onboarding_messages)
+        return
+
+    await _reply_markdown(update, WELCOME_MESSAGE)
 
 
 async def connect_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -554,7 +588,7 @@ async def stats_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # --- Send response ---
     if len(lines) > 2:
         lines.append("\n_Use /sleep /strain /workout /body for details_")
-        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+        await _reply_markdown(update, "\n".join(lines))
     elif not whoop_tokens and not withings_tokens:
         await update.message.reply_text(
             "You haven't connected any devices yet. Use /connect to get started."
@@ -692,7 +726,7 @@ async def sleep_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if debt is not None and debt > 0:
                 lines.append(f"Sleep debt: {_ms_to_hours_mins(debt)}")
 
-            await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+            await _reply_markdown(update, "\n".join(lines))
             return
 
     except Exception as e:
@@ -717,7 +751,7 @@ async def sleep_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             lines.append(f"Respiratory rate: {float(respiratory_rate):.1f} rpm")
         lines.append("")
         lines.append("Source: stored Whoop snapshot")
-        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+        await _reply_markdown(update, "\n".join(lines))
         return
 
     await update.message.reply_text("Failed to fetch sleep data. Try again later.")
@@ -768,7 +802,7 @@ async def strain_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if max_hr is not None:
                 lines.append(f"Max HR: {max_hr:.0f} bpm")
 
-            await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+            await _reply_markdown(update, "\n".join(lines))
             return
 
     except Exception as e:
@@ -783,7 +817,7 @@ async def strain_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if strain is not None:
             lines.append(f"Strain: *{float(strain):.1f}*")
         lines.append("Source: stored Whoop snapshot")
-        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+        await _reply_markdown(update, "\n".join(lines))
         return
 
     await update.message.reply_text("Failed to fetch strain data. Try again later.")
@@ -862,7 +896,7 @@ async def workout_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         if zone_ms and zone_ms > 0:
                             lines.append(f"  {name}: {_ms_to_hours_mins(zone_ms)}")
 
-                await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+                await _reply_markdown(update, "\n".join(lines))
                 await whoop.close()
                 return
         except Exception as e:
@@ -872,7 +906,7 @@ async def workout_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     manual_lines = _manual_workout_reply()
     if manual_lines:
-        await update.message.reply_text("\n".join(manual_lines), parse_mode="Markdown")
+        await _reply_markdown(update, "\n".join(manual_lines))
         return
 
     await update.message.reply_text("No workout data available yet. Use /log to record a workout.")
@@ -980,7 +1014,7 @@ async def body_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await update.message.reply_text("No body measurement data available.")
     else:
-        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+        await _reply_markdown(update, "\n".join(lines))
 
 
 async def progress_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1016,7 +1050,7 @@ async def progress_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    await update.message.reply_text(summary)
+    await _reply_markdown(update, summary)
 
 
 async def log_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1084,7 +1118,7 @@ async def log_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]
         )
 
-    await update.message.reply_text("\n".join(line for line in reply_lines if line != ""))
+    await _reply_markdown(update, "\n".join(line for line in reply_lines if line != ""))
 
 
 def _parse_weight_token(token: str) -> float | None:
@@ -1107,7 +1141,7 @@ async def profile_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         existing_profile = {}
 
     if not context.args:
-        await update.message.reply_text(_format_profile(existing_profile))
+        await _reply_markdown(update, _format_profile(existing_profile))
         return
 
     updates = {}
@@ -1165,13 +1199,13 @@ async def profile_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]
         )
 
-    await update.message.reply_text("\n".join(reply_lines))
+    await _reply_markdown(update, "\n".join(reply_lines))
 
 
 async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle the /help command with a list of all commands."""
     logger.info(f"/help from user {update.effective_user.id}")
-    await update.message.reply_text(HELP_MESSAGE, parse_mode="Markdown")
+    await _reply_markdown(update, HELP_MESSAGE)
 
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1180,6 +1214,30 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_message = update.message.text
     logger.info(f"Message from {user.id}: {user_message[:50]}...")
     _ensure_user_record(user)
+
+    try:
+        user_profile = get_user_profile(user.id)
+        onboarding_state = get_onboarding_state(user.id)
+    except Exception as e:
+        logger.error(f"Failed to fetch user onboarding context for {user.id}: {e}")
+        user_profile = None
+        onboarding_state = None
+
+    if needs_onboarding(user_profile, onboarding_state):
+        try:
+            onboarding_messages = await process_onboarding_message(
+                telegram_id=user.id,
+                username=user.username or user.first_name or "there",
+                message_text=user_message,
+                onboarding_state=onboarding_state,
+            )
+        except Exception as e:
+            logger.error(f"Onboarding flow failed for {user.id}: {e}")
+            await update.message.reply_text("I hit a snag while saving your onboarding. Send that again and I'll keep going.")
+            return
+
+        await _reply_sequence(update, onboarding_messages)
+        return
 
     # Build live user context for the coaching agent
     user_context = await build_user_context(
@@ -1199,8 +1257,4 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Failed to store assistant chat message for {user.id}: {e}")
 
-    # Try Markdown first, fall back to plain text if Telegram rejects the formatting
-    try:
-        await update.message.reply_text(response, parse_mode="Markdown")
-    except BadRequest:
-        await update.message.reply_text(response)
+    await _reply_markdown(update, response)
