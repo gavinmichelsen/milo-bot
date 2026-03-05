@@ -81,9 +81,9 @@ Milo coaches across four domains, and every recommendation ties back to your rea
 │              Claude AI Coaching Brain                 │
 │                                                      │
 │  System prompt (coaching/prompts.py)                 │
-│  + User context injection (Whoop + Withings data)    │
-│  + Security layer (rate limit, topic scope, anti-PII)│
-│  → Claude Sonnet 4.6 API call                        │
+│  + User context injection (Whoop + Withings + workouts)│
+│  + Security layer (rate limit, topic scope, anti-PII) │
+│  → Claude API call (model configurable via MILO_MODEL)│
 │  → Personalized coaching response                    │
 └──────────────────────────────────────────────────────┘
 ```
@@ -91,7 +91,7 @@ Milo coaches across four domains, and every recommendation ties back to your rea
 | Component | Technology | Why |
 |-----------|-----------|-----|
 | Runtime | Python 3.11+ | Async-native with a rich ecosystem for API integrations |
-| AI Engine | Claude Sonnet 4.6 (Anthropic API) | Best reasoning for nuanced coaching with structured data context |
+| AI Engine | Anthropic Claude (configurable model via `MILO_MODEL`) | Flexible model selection while keeping coaching quality |
 | Chat Interface | Telegram (python-telegram-bot) | Ubiquitous, solid bot API, inline keyboards work great for OAuth flows |
 | Database | Supabase (PostgreSQL) | Managed Postgres with a REST API and a generous free tier |
 | Deployment | Railway | Git-push deploys, persistent containers, built-in health checks |

@@ -8,7 +8,6 @@ to the Claude agent for AI coaching responses.
 
 import os
 
-import httpx
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import BadRequest
 from telegram.ext import ContextTypes
@@ -16,6 +15,7 @@ from telegram.ext import ContextTypes
 from agent import get_coaching_response
 from core.database import upsert_user, get_whoop_tokens, get_withings_tokens
 from core.oauth_state import create_state
+from core.user_context import build_user_context
 from integrations.whoop import WhoopClient
 from utils.logger import setup_logger
 
@@ -249,14 +249,11 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_message = update.message.text
     logger.info(f"Message from {user.id}: {user_message[:50]}...")
 
-    # Build user context for the coaching agent
-    user_context = {
-        "telegram_id": user.id,
-        "username": user.username or user.first_name,
-        "whoop_data": None,     # TODO: Fetch from Supabase
-        "withings_data": None,  # TODO: Fetch from Supabase
-        "workout_history": [],  # TODO: Fetch from Supabase
-    }
+    # Build live user context for the coaching agent
+    user_context = await build_user_context(
+        telegram_id=user.id,
+        username=user.username or user.first_name,
+    )
 
     response = await get_coaching_response(user_message, user_context)
 

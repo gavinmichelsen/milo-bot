@@ -17,7 +17,7 @@ from utils.logger import setup_logger
 
 logger = setup_logger("milo.agent")
 
-MODEL = "claude-sonnet-4-6"
+MODEL = os.getenv("MILO_MODEL", "claude-sonnet-4-6")
 
 # Lazy client — created on first use so the bot can start without an API key
 _client: Optional[anthropic.Anthropic] = None
