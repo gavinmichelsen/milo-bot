@@ -34,9 +34,7 @@ def _msg(text: str, buttons: list[list[tuple[str, str]]] | None = None) -> Onboa
 
 
 # Button presets for each step
-BUTTONS_WELCOME = [[("Yes, let's go", "yes")]]
-BUTTONS_MEDICAL_AGE = [[("Yes, 18+", "yes_18"), ("Under 18", "under_18")]]
-BUTTONS_MINOR_CLEARANCE = [[("Yes, confirmed", "yes")]]
+BUTTONS_WELCOME = [[("Yes, I understand — let's go", "yes")]]
 BUTTONS_GOAL = [
     [("Get bigger", "muscle_gain"), ("Get leaner", "fat_loss")],
     [("Both / recomp", "recomp"), ("Maintain", "maintain")],
@@ -58,16 +56,8 @@ BUTTONS_CONFIRM = [[("Looks good", "yes"), ("Change something", "change")]]
 
 WELCOME_PROMPT = (
     "Hey! I'm Milo, your AI fitness coach. I'm going to help you build a training plan and dial in your nutrition — all over Telegram.\n\n"
-    "Before I can build anything useful, I need to get to know you a bit. It'll take maybe 10 minutes and I'll ask questions in chunks so it doesn't feel like a questionnaire. Ready to get started?"
-)
-
-MEDICAL_PROMPT = (
-    "Before we get started — just to keep things legit: I'm an AI fitness coach, not a doctor. Everything I give you is general fitness and nutrition guidance, not medical advice. If you have any health conditions, injuries, or concerns, please check in with a physician before starting a new training or nutrition program. That goes double if you're under 18 — I'll need you (or a parent) to confirm you've consulted or will consult a doctor before we begin. Sound good?\n\n"
-    "Are you 18 or older?"
-)
-
-MINOR_CLEARANCE_PROMPT = (
-    "Got it. I can absolutely work with you, but I want to make sure a parent or guardian is aware, and that you've either spoken to a doctor or plan to before starting any new training program. Can you confirm that's the case?"
+    "Before we get started, quick disclaimer: I'm an AI coach, not a doctor. Everything I give you is general fitness and nutrition guidance, not medical advice. If you have any health conditions or concerns, check with a physician before starting a new program.\n\n"
+    "Before I can build anything useful, I need to get to know you. It'll take a few minutes — ready to get started?"
 )
 
 BASICS_PROMPT = (
@@ -292,53 +282,16 @@ async def process_onboarding_message(telegram_id: int, username: str, message_te
     text = (message_text or "").strip()
 
     # Detect clarifying questions and route to Claude instead of failing extraction
-    if step not in ("welcome_ready", "medical_age", "minor_clearance") and _is_question(text):
+    if step not in ("welcome_ready",) and _is_question(text):
         last_question = state.get("last_question")
         answer = await _answer_onboarding_question(telegram_id, username, text, step, last_question)
         return [_msg(answer)]
 
     if step == "welcome_ready":
         if _is_affirmative(text):
-            return _transition(telegram_id, profile, "medical_age", MEDICAL_PROMPT)
+            profile["medical_disclaimer_acknowledged"] = True
+            return _transition(telegram_id, profile, "basics", BASICS_PROMPT, prefix="Let's build something.")
         return [_msg("Whenever you're ready, send me a quick yes and we'll get into it."), _msg(WELCOME_PROMPT, BUTTONS_WELCOME)]
-
-    if step == "medical_age":
-        age = _extract_age(text)
-        lowered = text.lower().strip()
-        # Handle button callbacks
-        if lowered == "yes_18" or lowered == "yes, 18+":
-            profile["medical_disclaimer_acknowledged"] = True
-            profile["age_under_18"] = False
-            return _transition(telegram_id, profile, "basics", _prompt_for_step("basics", profile), prefix="Great. Acknowledged — let's build something.")
-        if lowered == "under_18":
-            profile["medical_disclaimer_acknowledged"] = True
-            profile["age_under_18"] = True
-            return _transition(telegram_id, profile, "minor_clearance", MINOR_CLEARANCE_PROMPT)
-        if age is not None:
-            profile["age_years"] = age
-            profile["medical_disclaimer_acknowledged"] = True
-            if age >= 18:
-                profile["age_under_18"] = False
-                return _transition(telegram_id, profile, "basics", _prompt_for_step("basics", profile), prefix="Great. Acknowledged — let's build something.")
-            profile["age_under_18"] = True
-            return _transition(telegram_id, profile, "minor_clearance", MINOR_CLEARANCE_PROMPT)
-        if _is_affirmative(lowered):
-            profile["medical_disclaimer_acknowledged"] = True
-            profile["age_under_18"] = False
-            return _transition(telegram_id, profile, "basics", _prompt_for_step("basics", profile), prefix="Great. Acknowledged — let's build something.")
-        if _looks_under_18(lowered):
-            profile["medical_disclaimer_acknowledged"] = True
-            profile["age_under_18"] = True
-            return _transition(telegram_id, profile, "minor_clearance", MINOR_CLEARANCE_PROMPT)
-        return [_msg("I just need to confirm the disclaimer and whether you're 18 or older."), _msg(MEDICAL_PROMPT, BUTTONS_MEDICAL_AGE)]
-
-    if step == "minor_clearance":
-        if _is_affirmative(text):
-            profile["medical_clearance_confirmed"] = True
-            profile["age_under_18"] = True
-            return _transition(telegram_id, profile, "basics", _prompt_for_step("basics", profile), prefix="Got it. We'll keep volume and intensity conservative to start.")
-        upsert_onboarding_state(telegram_id, status="paused", current_step="minor_clearance", profile_data=profile, last_question=MINOR_CLEARANCE_PROMPT)
-        return [_msg("No worries — come back when you've had that conversation and I'll be here.")]
 
     if step == "basics":
         profile.update(_extract_basics(text, profile))
@@ -553,8 +506,6 @@ async def _complete_onboarding(telegram_id: int, username: str, profile: dict[st
 
 STEP_BUTTONS = {
     "welcome_ready": BUTTONS_WELCOME,
-    "medical_age": BUTTONS_MEDICAL_AGE,
-    "minor_clearance": BUTTONS_MINOR_CLEARANCE,
     "goal_schedule": BUTTONS_GOAL,
     "equipment": BUTTONS_EQUIPMENT,
     "nutrition_mode": BUTTONS_NUTRITION,
@@ -574,8 +525,6 @@ def _transition(telegram_id: int, profile: dict[str, Any], next_step: str, promp
 
 
 def _prompt_for_step(step: str | None, profile: dict[str, Any]) -> str:
-    if step == "medical_age":
-        return MEDICAL_PROMPT
     if step == "basics":
         if profile.get("sex") is not None and profile.get("age_years") is not None and profile.get("height_cm") is None:
             return "I already have your sex and age. I just need your height now."

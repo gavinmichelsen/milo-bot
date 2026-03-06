@@ -16,7 +16,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
-from agent import get_coaching_response
+from agent import get_coaching_response, stream_coaching_response
 from coaching.training import build_training_guidance, check_progressive_overload, format_workout_log
 from coaching.progress import build_weekly_progress_summary
 from core.database import (
@@ -1253,7 +1253,14 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         username=user.username or user.first_name,
     )
 
-    response = await get_coaching_response(user_message, user_context)
+    # Stream the response with live draft updates
+    try:
+        response = await stream_coaching_response(
+            user_message, user_context, context.bot, user.id,
+        )
+    except Exception as e:
+        logger.error(f"Streaming failed for {user.id}, falling back: {e}")
+        response = await get_coaching_response(user_message, user_context)
 
     try:
         store_chat_message(user.id, "user", user_message)
@@ -1269,7 +1276,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 _BUTTON_LABELS = {
-    "yes": "Yes, let's go", "yes_18": "Yes, 18+", "under_18": "Under 18",
+    "yes": "Yes, I understand — let's go",
     "muscle_gain": "Get bigger", "fat_loss": "Get leaner", "recomp": "Both / recomp", "maintain": "Maintain",
     "full_gym": "Full gym", "home_gym": "Home gym", "minimal": "Minimal",
     "balanced": "Balanced", "upper": "Upper body", "lower": "Lower body", "arms": "Arms",

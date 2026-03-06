@@ -196,3 +196,85 @@ async def get_coaching_response(user_message: str, user_context: dict) -> str:
     except anthropic.APIError as e:
         logger.error(f"Anthropic API error: {e}")
         return "I'm having trouble thinking right now. Try again in a moment."
+
+
+async def stream_coaching_response(user_message: str, user_context: dict, bot, chat_id: int) -> str:
+    """Stream a coaching response to Telegram using sendMessageDraft.
+
+    Sends progressive draft updates as Claude generates tokens, then
+    sends the final message. Returns the complete response text.
+    """
+    import time
+
+    telegram_id = user_context.get("telegram_id", 0)
+
+    is_allowed, rejection = validate_message(telegram_id, user_message)
+    if not is_allowed:
+        logger.info(f"Message rejected for user {telegram_id}: {rejection}")
+        return rejection
+
+    context_str = build_user_context(user_context)
+    full_message = context_str + user_message
+
+    conversation_messages = []
+    for item in (user_context.get("chat_history") or [])[-6:]:
+        role = item.get("role")
+        content = (item.get("content") or "").strip()
+        if role in {"user", "assistant"} and content:
+            conversation_messages.append({"role": role, "content": content})
+    conversation_messages.append({"role": "user", "content": full_message})
+
+    username = user_context.get("username", "there")
+    system_prompt = (
+        MILO_SYSTEM_PROMPT
+        + f"\n\nYou are coaching {username}."
+        + "\nWhen nutrition state, recovery state, or training guidance are present, treat them as the primary decision constraints."
+        + " Do not contradict calorie/protein targets, recovery actions, or training adjustments unless the user explicitly asks to override them."
+    )
+
+    try:
+        draft_id = int(time.time() * 1000) % (2**31 - 1)  # unique draft ID
+        accumulated = ""
+        last_draft_time = 0.0
+        draft_interval = 0.3  # seconds between draft updates
+
+        with _get_client().messages.stream(
+            model=MODEL,
+            max_tokens=1024,
+            system=system_prompt,
+            messages=conversation_messages,
+        ) as stream:
+            for text_chunk in stream.text_stream:
+                accumulated += text_chunk
+                now = time.time()
+                # Throttle draft updates
+                if now - last_draft_time >= draft_interval and len(accumulated) > 10:
+                    try:
+                        await bot.send_message_draft(
+                            chat_id=chat_id,
+                            draft_id=draft_id,
+                            text=accumulated,
+                        )
+                        last_draft_time = now
+                    except Exception as e:
+                        logger.debug(f"Draft update failed (non-fatal): {e}")
+
+        # Send final complete message (clears the draft)
+        try:
+            await bot.send_message_draft(
+                chat_id=chat_id,
+                draft_id=draft_id,
+                text=accumulated,
+            )
+        except Exception:
+            pass
+
+        return accumulated
+
+    except anthropic.APIError as e:
+        logger.error(f"Anthropic API error during streaming: {e}")
+        return "I'm having trouble thinking right now. Try again in a moment."
+    except Exception as e:
+        logger.error(f"Streaming error: {e}")
+        # Fall back to non-streaming
+        return await get_coaching_response(user_message, user_context)
