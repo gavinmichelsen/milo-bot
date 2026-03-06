@@ -6,7 +6,7 @@ from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-from core.database import get_onboarding_state, upsert_onboarding_state, upsert_user_profile
+from core.database import get_onboarding_state, upsert_onboarding_state, upsert_user_profile, upsert_training_program
 from core.user_context import build_user_context
 
 from agent import get_coaching_response
@@ -136,119 +136,121 @@ ESSENTIAL_FIELDS = {
     "nutrition_mode",
 }
 
+# Each exercise: (name, rep_range, rest, [muscle_groups_hit])
+# Muscle groups: quads, hams_glutes, chest, back, shoulders, biceps, triceps, calves, core
 SESSION_LIBRARY = {
     "full_gym": {
         "A": [
-            ("Back Squat", "5-8", "150s", "lower_compound"),
-            ("Chest-Supported Row", "6-10", "150s", "upper_compound"),
-            ("Bench Press", "6-10", "150s", "upper_compound"),
-            ("Romanian Deadlift", "8-12", "120s", "lower_compound"),
-            ("DB Lateral Raise", "12-15", "60s", "upper_accessory"),
-            ("DB Curl", "10-15", "60s", "arms_accessory"),
-            ("Tricep Pushdown", "10-15", "60s", "arms_accessory"),
+            ("Back Squat", "5-8", "150s", ["quads", "hams_glutes"]),
+            ("Bench Press", "6-10", "150s", ["chest", "triceps", "shoulders"]),
+            ("Chest-Supported Row", "8-12", "120s", ["back", "biceps"]),
+            ("Romanian Deadlift", "8-12", "120s", ["hams_glutes"]),
+            ("DB Lateral Raise", "12-15", "60s", ["shoulders"]),
+            ("DB Curl", "10-15", "60s", ["biceps"]),
+            ("Tricep Pushdown", "10-15", "60s", ["triceps"]),
         ],
         "B": [
-            ("Leg Press", "8-12", "150s", "lower_compound"),
-            ("Lat Pulldown", "8-12", "120s", "upper_compound"),
-            ("Incline DB Press", "8-12", "120s", "upper_compound"),
-            ("Seated Hamstring Curl", "10-15", "75s", "lower_accessory"),
-            ("Rear Delt Fly", "12-20", "60s", "upper_accessory"),
-            ("Overhead Tricep Extension", "10-15", "60s", "arms_accessory"),
-            ("Standing Calf Raise", "10-15", "60s", "lower_accessory"),
+            ("Leg Press", "8-12", "150s", ["quads", "hams_glutes"]),
+            ("Incline DB Press", "8-12", "120s", ["chest", "triceps", "shoulders"]),
+            ("Lat Pulldown", "8-12", "120s", ["back", "biceps"]),
+            ("Seated Hamstring Curl", "10-15", "75s", ["hams_glutes"]),
+            ("Rear Delt Fly", "12-20", "60s", ["shoulders", "back"]),
+            ("Overhead Tricep Extension", "10-15", "60s", ["triceps"]),
+            ("Standing Calf Raise", "10-15", "60s", ["calves"]),
         ],
         "C": [
-            ("Front Squat", "5-8", "150s", "lower_compound"),
-            ("Cable Row", "8-12", "120s", "upper_compound"),
-            ("Overhead Press", "6-10", "120s", "upper_compound"),
-            ("Bulgarian Split Squat", "8-12", "90s", "lower_compound"),
-            ("Cable Lateral Raise", "12-20", "60s", "upper_accessory"),
-            ("Hammer Curl", "10-15", "60s", "arms_accessory"),
-            ("Cable Crunch", "10-15", "60s", "core_accessory"),
+            ("Front Squat", "5-8", "150s", ["quads"]),
+            ("Overhead Press", "6-10", "120s", ["shoulders", "triceps"]),
+            ("Cable Row", "8-12", "120s", ["back", "biceps"]),
+            ("Bulgarian Split Squat", "8-12", "90s", ["quads", "hams_glutes"]),
+            ("Cable Lateral Raise", "12-20", "60s", ["shoulders"]),
+            ("Hammer Curl", "10-15", "60s", ["biceps"]),
+            ("Cable Crunch", "10-15", "60s", ["core"]),
         ],
         "D": [
-            ("Hack Squat", "8-12", "150s", "lower_compound"),
-            ("Pull-Up or Assisted Pull-Up", "6-10", "120s", "upper_compound"),
-            ("Machine Chest Press", "8-12", "120s", "upper_compound"),
-            ("Hip Thrust", "8-12", "120s", "lower_compound"),
-            ("Face Pull", "12-20", "60s", "upper_accessory"),
-            ("EZ-Bar Curl", "10-15", "60s", "arms_accessory"),
-            ("Cable Pressdown", "10-15", "60s", "arms_accessory"),
+            ("Hack Squat", "8-12", "150s", ["quads"]),
+            ("Machine Chest Press", "8-12", "120s", ["chest", "triceps"]),
+            ("Pull-Up or Assisted Pull-Up", "6-10", "120s", ["back", "biceps"]),
+            ("Hip Thrust", "8-12", "120s", ["hams_glutes"]),
+            ("Face Pull", "12-20", "60s", ["shoulders", "back"]),
+            ("EZ-Bar Curl", "10-15", "60s", ["biceps"]),
+            ("Cable Pressdown", "10-15", "60s", ["triceps"]),
         ],
     },
     "home_gym": {
         "A": [
-            ("Back Squat", "5-8", "150s", "lower_compound"),
-            ("Barbell Row", "6-10", "120s", "upper_compound"),
-            ("Bench Press", "6-10", "150s", "upper_compound"),
-            ("Romanian Deadlift", "8-12", "120s", "lower_compound"),
-            ("DB Lateral Raise", "12-15", "60s", "upper_accessory"),
-            ("DB Curl", "10-15", "60s", "arms_accessory"),
-            ("Lying Tricep Extension", "10-15", "60s", "arms_accessory"),
+            ("Back Squat", "5-8", "150s", ["quads", "hams_glutes"]),
+            ("Bench Press", "6-10", "150s", ["chest", "triceps", "shoulders"]),
+            ("Barbell Row", "6-10", "120s", ["back", "biceps"]),
+            ("Romanian Deadlift", "8-12", "120s", ["hams_glutes"]),
+            ("DB Lateral Raise", "12-15", "60s", ["shoulders"]),
+            ("DB Curl", "10-15", "60s", ["biceps"]),
+            ("Lying Tricep Extension", "10-15", "60s", ["triceps"]),
         ],
         "B": [
-            ("Front Squat or Goblet Squat", "8-12", "120s", "lower_compound"),
-            ("Pull-Up or Band Pulldown", "6-10", "120s", "upper_compound"),
-            ("Incline DB Press", "8-12", "120s", "upper_compound"),
-            ("Split Squat", "8-12", "90s", "lower_compound"),
-            ("Rear Delt Raise", "12-20", "60s", "upper_accessory"),
-            ("Hammer Curl", "10-15", "60s", "arms_accessory"),
-            ("Standing Calf Raise", "12-20", "60s", "lower_accessory"),
+            ("Front Squat or Goblet Squat", "8-12", "120s", ["quads"]),
+            ("Incline DB Press", "8-12", "120s", ["chest", "triceps", "shoulders"]),
+            ("Pull-Up or Band Pulldown", "6-10", "120s", ["back", "biceps"]),
+            ("Split Squat", "8-12", "90s", ["quads", "hams_glutes"]),
+            ("Rear Delt Raise", "12-20", "60s", ["shoulders", "back"]),
+            ("Hammer Curl", "10-15", "60s", ["biceps"]),
+            ("Standing Calf Raise", "12-20", "60s", ["calves"]),
         ],
         "C": [
-            ("Deadlift", "4-6", "150s", "lower_compound"),
-            ("One-Arm DB Row", "8-12", "90s", "upper_compound"),
-            ("Overhead Press", "6-10", "120s", "upper_compound"),
-            ("DB Romanian Deadlift", "8-12", "90s", "lower_compound"),
-            ("DB Lateral Raise", "12-20", "60s", "upper_accessory"),
-            ("Close-Grip Push-Up", "8-15", "60s", "arms_accessory"),
-            ("Hanging Knee Raise", "10-15", "60s", "core_accessory"),
+            ("Deadlift", "4-6", "150s", ["hams_glutes", "back", "quads"]),
+            ("Overhead Press", "6-10", "120s", ["shoulders", "triceps"]),
+            ("One-Arm DB Row", "8-12", "90s", ["back", "biceps"]),
+            ("DB Romanian Deadlift", "8-12", "90s", ["hams_glutes"]),
+            ("DB Lateral Raise", "12-20", "60s", ["shoulders"]),
+            ("Close-Grip Push-Up", "8-15", "60s", ["chest", "triceps"]),
+            ("Hanging Knee Raise", "10-15", "60s", ["core"]),
         ],
         "D": [
-            ("Pause Squat", "5-8", "150s", "lower_compound"),
-            ("Chest-Supported DB Row", "8-12", "90s", "upper_compound"),
-            ("Flat DB Press", "8-12", "120s", "upper_compound"),
-            ("Hip Thrust", "8-12", "120s", "lower_compound"),
-            ("Band Face Pull", "12-20", "60s", "upper_accessory"),
-            ("DB Curl", "10-15", "60s", "arms_accessory"),
-            ("Skull Crusher", "10-15", "60s", "arms_accessory"),
+            ("Pause Squat", "5-8", "150s", ["quads", "hams_glutes"]),
+            ("Flat DB Press", "8-12", "120s", ["chest", "triceps"]),
+            ("Chest-Supported DB Row", "8-12", "90s", ["back", "biceps"]),
+            ("Hip Thrust", "8-12", "120s", ["hams_glutes"]),
+            ("Band Face Pull", "12-20", "60s", ["shoulders", "back"]),
+            ("DB Curl", "10-15", "60s", ["biceps"]),
+            ("Skull Crusher", "10-15", "60s", ["triceps"]),
         ],
     },
     "minimal": {
         "A": [
-            ("Goblet Squat", "8-12", "90s", "lower_compound"),
-            ("One-Arm DB Row", "8-12", "90s", "upper_compound"),
-            ("Push-Up", "8-15", "75s", "upper_compound"),
-            ("DB Romanian Deadlift", "10-15", "90s", "lower_compound"),
-            ("DB Lateral Raise", "12-20", "60s", "upper_accessory"),
-            ("DB Curl", "10-15", "60s", "arms_accessory"),
-            ("Overhead Tricep Extension", "10-15", "60s", "arms_accessory"),
+            ("Goblet Squat", "8-12", "90s", ["quads", "hams_glutes"]),
+            ("Push-Up", "8-15", "75s", ["chest", "triceps", "shoulders"]),
+            ("One-Arm DB Row", "8-12", "90s", ["back", "biceps"]),
+            ("DB Romanian Deadlift", "10-15", "90s", ["hams_glutes"]),
+            ("DB Lateral Raise", "12-20", "60s", ["shoulders"]),
+            ("DB Curl", "10-15", "60s", ["biceps"]),
+            ("Overhead Tricep Extension", "10-15", "60s", ["triceps"]),
         ],
         "B": [
-            ("Split Squat", "8-12", "90s", "lower_compound"),
-            ("Band or Inverted Row", "8-15", "75s", "upper_compound"),
-            ("DB Floor Press", "8-12", "90s", "upper_compound"),
-            ("Single-Leg Romanian Deadlift", "10-12", "75s", "lower_compound"),
-            ("Rear Delt Raise", "12-20", "60s", "upper_accessory"),
-            ("Hammer Curl", "10-15", "60s", "arms_accessory"),
-            ("Standing Calf Raise", "15-20", "60s", "lower_accessory"),
+            ("Split Squat", "8-12", "90s", ["quads", "hams_glutes"]),
+            ("DB Floor Press", "8-12", "90s", ["chest", "triceps"]),
+            ("Band or Inverted Row", "8-15", "75s", ["back", "biceps"]),
+            ("Single-Leg Romanian Deadlift", "10-12", "75s", ["hams_glutes"]),
+            ("Rear Delt Raise", "12-20", "60s", ["shoulders", "back"]),
+            ("Hammer Curl", "10-15", "60s", ["biceps"]),
+            ("Standing Calf Raise", "15-20", "60s", ["calves"]),
         ],
         "C": [
-            ("Tempo Goblet Squat", "10-15", "90s", "lower_compound"),
-            ("One-Arm DB Row", "10-15", "75s", "upper_compound"),
-            ("Pike Push-Up or DB Press", "8-12", "75s", "upper_compound"),
-            ("Glute Bridge", "12-20", "75s", "lower_compound"),
-            ("DB Lateral Raise", "12-20", "60s", "upper_accessory"),
-            ("DB Curl", "10-15", "60s", "arms_accessory"),
-            ("Dead Bug", "8-12/side", "45s", "core_accessory"),
+            ("Tempo Goblet Squat", "10-15", "90s", ["quads"]),
+            ("Pike Push-Up or DB Press", "8-12", "75s", ["shoulders", "chest", "triceps"]),
+            ("One-Arm DB Row", "10-15", "75s", ["back", "biceps"]),
+            ("Glute Bridge", "12-20", "75s", ["hams_glutes"]),
+            ("DB Lateral Raise", "12-20", "60s", ["shoulders"]),
+            ("DB Curl", "10-15", "60s", ["biceps"]),
+            ("Dead Bug", "8-12/side", "45s", ["core"]),
         ],
         "D": [
-            ("Reverse Lunge", "8-12", "75s", "lower_compound"),
-            ("Band Row", "10-15", "60s", "upper_compound"),
-            ("Feet-Elevated Push-Up", "8-15", "75s", "upper_compound"),
-            ("DB Romanian Deadlift", "10-15", "75s", "lower_compound"),
-            ("Band Face Pull", "12-20", "45s", "upper_accessory"),
-            ("Hammer Curl", "10-15", "45s", "arms_accessory"),
-            ("Diamond Push-Up", "8-15", "45s", "arms_accessory"),
+            ("Reverse Lunge", "8-12", "75s", ["quads", "hams_glutes"]),
+            ("Feet-Elevated Push-Up", "8-15", "75s", ["chest", "triceps"]),
+            ("Band Row", "10-15", "60s", ["back", "biceps"]),
+            ("DB Romanian Deadlift", "10-15", "75s", ["hams_glutes"]),
+            ("Band Face Pull", "12-20", "45s", ["shoulders", "back"]),
+            ("Hammer Curl", "10-15", "45s", ["biceps"]),
+            ("Diamond Push-Up", "8-15", "45s", ["triceps", "chest"]),
         ],
     },
 }
@@ -496,6 +498,9 @@ async def _complete_onboarding(telegram_id: int, username: str, profile: dict[st
     profile["onboarding_completed_at"] = now_iso
     upsert_user_profile(telegram_id, profile)
     upsert_onboarding_state(telegram_id, status="completed", current_step="completed", profile_data=profile, last_question=None, completed=True)
+    # Build and store the training program
+    program = _build_program(profile)
+    upsert_training_program(telegram_id, program)
     user_context = await build_user_context(telegram_id=telegram_id, username=username, refresh_nutrition=True)
     nutrition = user_context.get("nutrition_state") or {}
     return [
@@ -896,30 +901,185 @@ def _build_nutrition_message(profile: dict[str, Any], nutrition: dict[str, Any])
     )
 
 
-def _build_training_message(profile: dict[str, Any]) -> str:
+# Emphasis maps: which muscle groups get boosted/reduced
+_EMPHASIS_BOOST = {
+    "upper": {"chest", "back", "shoulders"},
+    "lower": {"quads", "hams_glutes", "calves"},
+    "arms": {"biceps", "triceps"},
+    "balanced": set(),
+}
+_EMPHASIS_REDUCE = {
+    "upper": {"quads", "hams_glutes", "calves"},
+    "lower": {"chest", "shoulders"},
+    "arms": {"quads", "hams_glutes"},
+    "balanced": set(),
+}
+
+# Weekly volume targets per muscle group (sets/week)
+# Tier: 2-4 = MED, 6-8 = great gains, 9-12 = maximal, 13-15+ = advanced only
+_VOLUME_TARGETS = {
+    "beginner": {"base": 2, "emphasis_boost": 1},     # ~2-3 sets/exercise → lands in MED-great range
+    "intermediate": {"base": 3, "emphasis_boost": 1},  # ~3-4 sets/exercise → lands in great-maximal range
+    "advanced": {"base": 3, "emphasis_boost": 2},      # ~3-5 sets/exercise → can push into 13+ for emphasis
+}
+
+MIN_SESSION_SETS = 15
+MAX_SESSION_SETS = 25
+
+
+def _sets_for_exercise(muscles: list[str], months: int, emphasis: str) -> int:
+    """Determine sets for an exercise based on experience and emphasis."""
+    level = "beginner" if months < 6 else "intermediate" if months < 36 else "advanced"
+    targets = _VOLUME_TARGETS[level]
+    base = targets["base"]
+    boost = targets["emphasis_boost"]
+    reduce_groups = _EMPHASIS_REDUCE.get(emphasis, set())
+    boost_groups = _EMPHASIS_BOOST.get(emphasis, set())
+
+    # Primary muscle is first in the list
+    primary = muscles[0] if muscles else ""
+    if primary in boost_groups:
+        return base + boost
+    if primary in reduce_groups:
+        return max(2, base - 1)
+    return base
+
+
+def _build_program(profile: dict[str, Any]) -> dict[str, Any]:
+    """Build the full training program as structured data.
+
+    Returns a dict with sessions and weekly volume summary,
+    suitable for storage in Supabase and display to the user.
+    """
     days = int(profile.get("training_days_per_week") or 3)
     equipment = profile.get("equipment_access") or "full_gym"
     emphasis = profile.get("emphasis_preference") or "balanced"
-    sessions = SESSION_LIBRARY.get(equipment, SESSION_LIBRARY["full_gym"])
-    order = ["A"] if days == 1 else ["A", "B"] if days == 2 else ["A", "B", "C"] if days == 3 else ["A", "B", "C", "D"]
     months = int(profile.get("training_age_months") or 0)
+    sessions_lib = SESSION_LIBRARY.get(equipment, SESSION_LIBRARY["full_gym"])
+    order = ["A"] if days == 1 else ["A", "B"] if days == 2 else ["A", "B", "C"] if days == 3 else ["A", "B", "C", "D"]
+
+    program_sessions = {}
+    weekly_volume: dict[str, int] = {}
+
+    for session_name in order:
+        exercises = []
+        session_total_sets = 0
+        for exercise_name, reps, rest, muscles in sessions_lib[session_name]:
+            sets = _sets_for_exercise(muscles, months, emphasis)
+            # Track for session cap
+            session_total_sets += sets
+            exercises.append({
+                "name": exercise_name,
+                "sets": sets,
+                "reps": reps,
+                "rest": rest,
+                "muscles": muscles,
+            })
+            # Accumulate weekly volume (primary muscle only for counting)
+            primary = muscles[0] if muscles else "other"
+            weekly_volume[primary] = weekly_volume.get(primary, 0) + sets
+
+        # Enforce session cap: if over MAX, trim from the end; if under MIN, bump compounds
+        if session_total_sets > MAX_SESSION_SETS:
+            excess = session_total_sets - MAX_SESSION_SETS
+            for ex in reversed(exercises):
+                if excess <= 0:
+                    break
+                trim = min(ex["sets"] - 2, excess)
+                if trim > 0:
+                    ex["sets"] -= trim
+                    primary = ex["muscles"][0] if ex["muscles"] else "other"
+                    weekly_volume[primary] -= trim
+                    excess -= trim
+        elif session_total_sets < MIN_SESSION_SETS:
+            deficit = MIN_SESSION_SETS - session_total_sets
+            for ex in exercises:
+                if deficit <= 0:
+                    break
+                bump = min(deficit, 1)
+                ex["sets"] += bump
+                primary = ex["muscles"][0] if ex["muscles"] else "other"
+                weekly_volume[primary] = weekly_volume.get(primary, 0) + bump
+                deficit -= bump
+
+        program_sessions[session_name] = exercises
+
+    # Sort volume summary highest to lowest
+    sorted_volume = sorted(weekly_volume.items(), key=lambda x: x[1], reverse=True)
+
+    return {
+        "days_per_week": min(days, 4),
+        "equipment": equipment,
+        "emphasis": emphasis,
+        "sessions": program_sessions,
+        "weekly_volume": sorted_volume,
+    }
+
+
+def _format_volume_tier(sets: int, months: int) -> str:
+    """Label a weekly volume number with its effectiveness tier."""
+    if sets <= 1:
+        return "below MED"
+    if sets <= 4:
+        return "MED"
+    if sets <= 8:
+        return "great gains"
+    if sets <= 12:
+        return "maximal gains"
+    if months >= 36:
+        return "advanced volume"
+    return "high — consider reducing"
+
+
+_MUSCLE_LABELS = {
+    "quads": "Quads",
+    "hams_glutes": "Hams/Glutes",
+    "chest": "Chest",
+    "back": "Back",
+    "shoulders": "Shoulders",
+    "biceps": "Biceps",
+    "triceps": "Triceps",
+    "calves": "Calves",
+    "core": "Core",
+}
+
+
+def _build_training_message(profile: dict[str, Any]) -> str:
+    days = int(profile.get("training_days_per_week") or 3)
+    months = int(profile.get("training_age_months") or 0)
+    program = _build_program(profile)
+
     lines = [
         "Now for training. Based on your goals and your schedule, here's your program:",
         "",
-        f"*{min(days, 4)}-Day Full-Body Program*",
+        f"*{program['days_per_week']}-Day Full-Body Program*",
         "",
     ]
-    for session_name in order:
-        lines.append(f"*Session {session_name}*")
-        for index, (exercise, reps, rest, category) in enumerate(sessions[session_name], start=1):
-            sets = _sets_for(category, months, emphasis)
-            lines.append(f"{index}. {exercise} — {sets} sets x {reps} reps, RIR 3-4, rest {rest}")
+
+    for session_name, exercises in program["sessions"].items():
+        session_sets = sum(e["sets"] for e in exercises)
+        lines.append(f"*Session {session_name}* ({session_sets} working sets)")
+        for idx, ex in enumerate(exercises, 1):
+            lines.append(f"{idx}. {ex['name']} — {ex['sets']} sets x {ex['reps']} reps, RIR 3-4, rest {ex['rest']}")
         lines.append("")
+
     if days > 4:
         lines.append("You gave me 5+ possible days, but I'm starting you with 4 lifting days so recovery stays ahead of fatigue. Use any extra day for easy cardio, walking, or mobility.")
         lines.append("")
+
+    # Weekly volume summary sorted highest to lowest
+    lines.append("*Weekly Volume by Muscle Group:*")
+    for muscle, sets in program["weekly_volume"]:
+        label = _MUSCLE_LABELS.get(muscle, muscle.title())
+        tier = _format_volume_tier(sets, months)
+        lines.append(f"- {label}: {sets} sets/week ({tier})")
+    lines.append("")
+
+    lines.append("*Volume guide:* 2-4 sets = minimum effective dose, 6-8 = great gains, 9-12 = maximal gains. 13+ only for advanced lifters on priority muscle groups.")
+    lines.append("")
+
     lines.append("A few quick notes:")
-    lines.append("- *RIR (Reps in Reserve):* how many more reps you could have done before failure. This week, stop with 3–4 reps left in the tank.")
+    lines.append("- *RIR (Reps in Reserve):* how many more reps you could have done before failure. This week, stop with 3-4 reps left in the tank.")
     lines.append("- *Log your lifts:* after each session, send me weights, sets, reps, and how it felt — easy, moderate, or hard.")
     lines.append("- *Warm-ups:* do 5 minutes of light cardio plus a few build-up sets before your first working set.")
     lines.append("")
@@ -933,20 +1093,6 @@ def _build_next_steps_message(profile: dict[str, Any]) -> str:
         f"{wearable_line}"
         "When you finish your first session, send me the lifts — weights, sets, reps, and how it felt. I'll take it from there."
     )
-
-
-def _sets_for(category: str, months: int, emphasis: str) -> int:
-    base = 2 if months < 6 else 3
-    if category.endswith("accessory") and months < 18:
-        base = 2
-    region = "arms" if category.startswith("arms") else "lower" if category.startswith("lower") else "upper"
-    if emphasis == region:
-        base += 1
-    if emphasis == "upper" and region == "lower" and base > 2:
-        base -= 1
-    if emphasis == "lower" and region == "upper" and base > 2:
-        base -= 1
-    return max(2, base)
 
 
 def _goal_label(goal: Any) -> str:

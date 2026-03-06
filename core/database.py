@@ -193,6 +193,36 @@ def upsert_user_profile(telegram_id: int, profile: dict) -> None:
     logger.info(f"Upserted user profile for telegram_id={telegram_id}")
 
 
+def upsert_training_program(telegram_id: int, program: dict) -> None:
+    import json
+    payload = {
+        "user_id": telegram_id,
+        "program_data": json.dumps(program),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    _postgrest_upsert("training_programs", payload, "user_id")
+    logger.info(f"Upserted training program for telegram_id={telegram_id}")
+
+
+def get_training_program(telegram_id: int) -> dict | None:
+    import json
+
+    def _query():
+        client = get_supabase_client()
+        result = (
+            client.table("training_programs")
+            .select("program_data")
+            .eq("user_id", telegram_id)
+            .execute()
+        )
+        if result.data:
+            raw = result.data[0].get("program_data")
+            return json.loads(raw) if isinstance(raw, str) else raw
+        return None
+
+    return _retry_on_dns_error(_query)
+
+
 def store_chat_message(telegram_id: int, role: str, content: str) -> None:
     def _query():
         client = get_supabase_client()

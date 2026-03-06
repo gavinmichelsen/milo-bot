@@ -126,6 +126,20 @@ def build_user_context(user_context: dict) -> str:
             f"Summary: {training.get('summary', 'N/A')}"
         )
 
+    # Training program
+    if user_context.get("training_program"):
+        prog = user_context["training_program"]
+        prog_lines = [f"Days/week: {prog.get('days_per_week', 'N/A')}", f"Equipment: {prog.get('equipment', 'N/A')}", f"Emphasis: {prog.get('emphasis', 'N/A')}"]
+        for session_name, exercises in (prog.get("sessions") or {}).items():
+            prog_lines.append(f"Session {session_name}:")
+            for ex in exercises:
+                prog_lines.append(f"  - {ex['name']}: {ex['sets']}x{ex['reps']}, rest {ex['rest']}")
+        if prog.get("weekly_volume"):
+            prog_lines.append("Weekly volume:")
+            for muscle, sets in prog["weekly_volume"]:
+                prog_lines.append(f"  - {muscle}: {sets} sets/week")
+        sections.append("[TRAINING PROGRAM]\n" + "\n".join(prog_lines))
+
     # Workout history
     if user_context.get("workout_history"):
         workouts = user_context["workout_history"][:5]

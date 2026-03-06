@@ -15,6 +15,7 @@ from core.database import (
     get_recent_chat_history,
     get_nutrition_state,
     get_recent_recovery_statuses,
+    get_training_program,
     get_user_profile,
     get_whoop_tokens,
     get_withings_tokens,
@@ -349,6 +350,7 @@ async def build_user_context(telegram_id: int, username: str, refresh_nutrition:
         "user_profile": None,
         "nutrition_state": None,
         "training_guidance": None,
+        "training_program": None,
         "whoop_data": None,
         "whoop_summary": None,
         "withings_data": None,
@@ -359,6 +361,11 @@ async def build_user_context(telegram_id: int, username: str, refresh_nutrition:
         context["user_profile"] = get_user_profile(telegram_id)
     except Exception as e:
         logger.error(f"Failed to fetch user profile for {telegram_id}: {e}")
+
+    try:
+        context["training_program"] = get_training_program(telegram_id)
+    except Exception as e:
+        logger.error(f"Failed to fetch training program for {telegram_id}: {e}")
 
     try:
         context["chat_history"] = get_recent_chat_history(telegram_id, limit=6)
