@@ -327,10 +327,14 @@ async def process_onboarding_message(telegram_id: int, username: str, message_te
         for key in ("training_age_months", "injury_notes", "injury_status"):
             if key in ai_extracted:
                 profile[key] = ai_extracted[key]
+        # If AI determined no injuries, explicitly mark it so we don't loop
+        if ai_extracted.get("injury_status") == "none" and "injury_notes" not in profile:
+            profile["injury_notes"] = None
+            profile["injury_status"] = "none"
         missing = []
         if profile.get("training_age_months") is None:
             missing.append("how long you've been lifting")
-        if "injury_notes" not in profile:
+        if "injury_notes" not in profile and "injury_status" not in profile:
             missing.append("whether you have any injuries")
         if missing:
             upsert_onboarding_state(telegram_id, current_step="training_background", profile_data=profile, last_question=TRAINING_PROMPT)
@@ -663,9 +667,12 @@ def _normalize_extracted(data: dict[str, Any]) -> dict[str, Any]:
     - Booleans are coerced from truthy/falsy values
     - Invalid or out-of-range values are silently dropped
     """
+    _NULLABLE_FIELDS = {"injury_notes", "injury_details", "estimated_body_fat_pct"}
     cleaned: dict[str, Any] = {}
     for key, value in data.items():
         if value is None:
+            if key in _NULLABLE_FIELDS:
+                cleaned[key] = None
             continue
 
         # Enum fields
@@ -738,7 +745,16 @@ async def _agentic_extract(text: str, step: str) -> dict[str, Any]:
             cleaned = cleaned.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
         result = json.loads(cleaned)
         # Filter to known fields, then normalize
-        extracted = {k: v for k, v in result.items() if v is not None and k in schema["fields"]}
+        # Preserve explicit nulls for nullable fields (injury_notes = null means "no injuries")
+        _NULLABLE_FIELDS = {"injury_notes", "injury_details", "estimated_body_fat_pct"}
+        extracted = {}
+        for k, v in result.items():
+            if k not in schema["fields"]:
+                continue
+            if v is None and k in _NULLABLE_FIELDS:
+                extracted[k] = None
+            elif v is not None:
+                extracted[k] = v
         return _normalize_extracted(extracted)
     except Exception:
         return {}
