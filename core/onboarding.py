@@ -350,19 +350,32 @@ async def process_onboarding_message(telegram_id: int, username: str, message_te
         if profile.get("age_years") is None:
             missing.append("age")
         if missing:
+            # Agentic fallback: use Claude to parse what regex couldn't
+            ai_extracted = await _agentic_extract(text, "basics")
+            for key in ("sex", "height_cm", "age_years"):
+                if profile.get(key) is None and key in ai_extracted:
+                    profile[key] = ai_extracted[key]
+            missing = [f for f in ["sex", "height_cm", "age_years"] if profile.get(f) is None]
+        if missing:
+            field_labels = {"sex": "sex", "height_cm": "height", "age_years": "age"}
             prompt = _prompt_for_step("basics", profile)
             upsert_onboarding_state(telegram_id, current_step="basics", profile_data=profile, last_question=prompt)
-            return [_msg(f"I still need your {' and '.join(missing)}."), _msg(prompt)]
+            return [_msg(f"I still need your {' and '.join(field_labels[f] for f in missing)}."), _msg(prompt)]
         return _transition(telegram_id, profile, "weight_bodyfat", WEIGHT_PROMPT)
 
     if step == "weight_bodyfat":
         body = _extract_weight_bodyfat(text)
         profile.update(body)
         if profile.get("body_weight_lbs") is None:
+            ai_extracted = await _agentic_extract(text, "weight_bodyfat")
+            for key in ("body_weight_lbs", "estimated_body_fat_pct", "body_fat_unknown"):
+                if key in ai_extracted:
+                    profile[key] = ai_extracted[key]
+        if profile.get("body_weight_lbs") is None:
             upsert_onboarding_state(telegram_id, current_step="weight_bodyfat", profile_data=profile, last_question=WEIGHT_PROMPT)
             return [_msg("I still need your current body weight."), _msg(WEIGHT_PROMPT)]
         messages: list[OnboardingMessage] = []
-        if body.get("body_fat_unknown"):
+        if body.get("body_fat_unknown") or profile.get("body_fat_unknown"):
             messages.append(_msg("No worries at all — most people don't know their exact BF%. I'll use a formula that doesn't need it for now. If you ever get a DEXA scan or InBody test, we can update your numbers and sharpen the calculations. For now we're good."))
         elif profile.get("estimated_body_fat_pct") is None:
             upsert_onboarding_state(telegram_id, current_step="weight_bodyfat", profile_data=profile, last_question=WEIGHT_PROMPT)
@@ -374,9 +387,19 @@ async def process_onboarding_message(telegram_id: int, username: str, message_te
         profile.update(_extract_training_background(text))
         missing = []
         if profile.get("training_age_months") is None:
-            missing.append("how long you've been lifting")
+            missing.append("training_age_months")
         if "injury_notes" not in profile:
-            missing.append("whether you have any injuries")
+            missing.append("injury_notes")
+        if missing:
+            ai_extracted = await _agentic_extract(text, "training_background")
+            for key in ("training_age_months", "injury_notes", "injury_status"):
+                if key in ai_extracted:
+                    profile[key] = ai_extracted[key]
+            missing = []
+            if profile.get("training_age_months") is None:
+                missing.append("how long you've been lifting")
+            if "injury_notes" not in profile:
+                missing.append("whether you have any injuries")
         if missing:
             upsert_onboarding_state(telegram_id, current_step="training_background", profile_data=profile, last_question=TRAINING_PROMPT)
             return [_msg(f"I still need {' and '.join(missing)}."), _msg(TRAINING_PROMPT)]
@@ -397,6 +420,16 @@ async def process_onboarding_message(telegram_id: int, username: str, message_te
         if profile.get("training_days_per_week") is None:
             missing.append("training days per week")
         if missing:
+            ai_extracted = await _agentic_extract(text, "goal_schedule")
+            for key in ("primary_goal", "training_days_per_week"):
+                if profile.get(key) is None and key in ai_extracted:
+                    profile[key] = ai_extracted[key]
+            missing = []
+            if profile.get("primary_goal") is None:
+                missing.append("your main goal")
+            if profile.get("training_days_per_week") is None:
+                missing.append("training days per week")
+        if missing:
             upsert_onboarding_state(telegram_id, current_step="goal_schedule", profile_data=profile, last_question=GOAL_PROMPT)
             return [_msg(f"I still need {' and '.join(missing)}."), _msg(GOAL_PROMPT, BUTTONS_GOAL)]
         messages = []
@@ -412,6 +445,16 @@ async def process_onboarding_message(telegram_id: int, username: str, message_te
             missing.append("equipment setup")
         if profile.get("emphasis_preference") is None:
             missing.append("training emphasis")
+        if missing:
+            ai_extracted = await _agentic_extract(text, "equipment")
+            for key in ("equipment_access", "emphasis_preference"):
+                if profile.get(key) is None and key in ai_extracted:
+                    profile[key] = ai_extracted[key]
+            missing = []
+            if profile.get("equipment_access") is None:
+                missing.append("equipment setup")
+            if profile.get("emphasis_preference") is None:
+                missing.append("training emphasis")
         if missing:
             upsert_onboarding_state(telegram_id, current_step="equipment", profile_data=profile, last_question=EQUIPMENT_PROMPT)
             return [_msg(f"I still need your {' and '.join(missing)}."), _msg(EQUIPMENT_PROMPT, BUTTONS_EQUIPMENT)]
@@ -603,6 +646,62 @@ async def _answer_onboarding_question(telegram_id: int, username: str, question:
     return await get_coaching_response(question, context)
 
 
+_STEP_EXTRACTION_SCHEMA = {
+    "basics": {
+        "instructions": "Extract sex (male/female), height in cm, and age in years from the user's message.",
+        "fields": {"sex": "male or female", "height_cm": "number in cm (convert from feet/inches if needed: 5'10 = 177.8cm)", "age_years": "integer"},
+    },
+    "weight_bodyfat": {
+        "instructions": "Extract body weight and body fat percentage. Convert kg to lbs if needed (multiply by 2.205).",
+        "fields": {"body_weight_lbs": "number in lbs", "estimated_body_fat_pct": "number or null if unknown", "body_fat_unknown": "true if they said they don't know"},
+    },
+    "training_background": {
+        "instructions": "Extract how long they've been training (in months) and any injury info.",
+        "fields": {"training_age_months": "integer months", "injury_notes": "string or null if no injuries", "injury_status": "none if no injuries"},
+    },
+    "goal_schedule": {
+        "instructions": "Extract their primary goal and training days per week.",
+        "fields": {"primary_goal": "one of: muscle_gain, fat_loss, recomp, maintain", "training_days_per_week": "integer 1-7"},
+    },
+    "equipment": {
+        "instructions": "Extract their gym equipment level and training emphasis.",
+        "fields": {"equipment_access": "one of: full_gym, home_gym, minimal", "emphasis_preference": "one of: balanced, upper, lower, arms"},
+    },
+}
+
+
+async def _agentic_extract(text: str, step: str) -> dict[str, Any]:
+    """Use Claude to extract structured data from an ambiguous user answer."""
+    schema = _STEP_EXTRACTION_SCHEMA.get(step)
+    if not schema:
+        return {}
+    import json
+    fields_desc = "\n".join(f"  - {k}: {v}" for k, v in schema["fields"].items())
+    prompt = (
+        f"{schema['instructions']}\n\n"
+        f"User said: \"{text}\"\n\n"
+        f"Extract these fields:\n{fields_desc}\n\n"
+        "Respond with ONLY a JSON object. Use null for fields you cannot determine. "
+        "Do not include any other text, explanation, or markdown formatting."
+    )
+    context = {"telegram_id": 0, "username": "system", "onboarding_extraction": True}
+    try:
+        raw = await get_coaching_response(prompt, context)
+        # Strip markdown code fences if present
+        cleaned = raw.strip()
+        if cleaned.startswith("```"):
+            cleaned = cleaned.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+        result = json.loads(cleaned)
+        # Filter out null values and validate types
+        extracted = {}
+        for key, value in result.items():
+            if value is not None and key in schema["fields"]:
+                extracted[key] = value
+        return extracted
+    except Exception:
+        return {}
+
+
 def _is_affirmative(text: str) -> bool:
     lowered = text.strip().lower()
     return lowered in YES_WORDS or lowered.startswith("yes") or lowered.startswith("yep")
@@ -635,8 +734,13 @@ def _extract_age(text: str) -> int | None:
     return candidates[-1] if candidates else None
 
 
+def _normalize_quotes(text: str) -> str:
+    """Replace smart/curly quotes with straight equivalents."""
+    return text.replace("\u2018", "'").replace("\u2019", "'").replace("\u02bc", "'").replace("\u2032", "'").replace("\u201c", '"').replace("\u201d", '"')
+
+
 def _extract_height_cm(text: str) -> float | None:
-    lowered = text.lower()
+    lowered = _normalize_quotes(text.lower())
     cm_match = re.search(r"(\d{3}(?:\.\d+)?)\s*cm", lowered)
     if cm_match:
         return round(float(cm_match.group(1)), 1)

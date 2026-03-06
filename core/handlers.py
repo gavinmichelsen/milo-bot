@@ -1268,6 +1268,18 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _reply_markdown(update, response)
 
 
+_BUTTON_LABELS = {
+    "yes": "Yes, let's go", "yes_18": "Yes, 18+", "under_18": "Under 18",
+    "muscle_gain": "Get bigger", "fat_loss": "Get leaner", "recomp": "Both / recomp", "maintain": "Maintain",
+    "full_gym": "Full gym", "home_gym": "Home gym", "minimal": "Minimal",
+    "balanced": "Balanced", "upper": "Upper body", "lower": "Lower body", "arms": "Arms",
+    "tracked": "Tracked", "habit": "Habit-based",
+    "whoop": "Whoop", "withings": "Withings", "both": "Both", "neither": "Neither",
+    "daily": "Daily", "training_days": "Training days", "weekly": "Weekly",
+    "change": "Change something",
+}
+
+
 async def onboarding_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle inline button presses during onboarding (callback_data prefixed with 'ob:')."""
     query = update.callback_query
@@ -1279,8 +1291,22 @@ async def onboarding_callback_handler(update: Update, context: ContextTypes.DEFA
         return
 
     button_value = data[3:]  # strip "ob:" prefix
+    button_label = _BUTTON_LABELS.get(button_value, button_value)
     logger.info(f"Onboarding button from {user.id}: {button_value}")
     _ensure_user_record(user)
+
+    # Edit the original message to show what the user selected (remove buttons)
+    try:
+        original_text = query.message.text or ""
+        await query.edit_message_text(
+            text=f"{original_text}\n\n*You selected: {button_label}*",
+            parse_mode="Markdown",
+        )
+    except BadRequest:
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except BadRequest:
+            pass
 
     try:
         onboarding_state = get_onboarding_state(user.id)
