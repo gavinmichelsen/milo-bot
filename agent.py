@@ -159,11 +159,13 @@ async def get_coaching_response(user_message: str, user_context: dict) -> str:
     """
     telegram_id = user_context.get("telegram_id", 0)
 
-    # Run security checks before hitting the API
-    is_allowed, rejection = validate_message(telegram_id, user_message)
-    if not is_allowed:
-        logger.info(f"Message rejected for user {telegram_id}: {rejection}")
-        return rejection
+    # Skip security checks for internal system calls (onboarding extraction, etc.)
+    is_internal = user_context.get("onboarding_extraction") or user_context.get("onboarding_context")
+    if not is_internal:
+        is_allowed, rejection = validate_message(telegram_id, user_message)
+        if not is_allowed:
+            logger.info(f"Message rejected for user {telegram_id}: {rejection}")
+            return rejection
 
     context_str = build_user_context(user_context)
     full_message = context_str + user_message

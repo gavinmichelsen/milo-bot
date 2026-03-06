@@ -693,7 +693,7 @@ def _extract_height_cm(text: str) -> float | None:
     cm_match = re.search(r"(\d{3}(?:\.\d+)?)\s*cm", lowered)
     if cm_match:
         return round(float(cm_match.group(1)), 1)
-    ft_match = re.search(r"(\d)\s*(?:ft|feet|')\s*(\d{1,2})?", lowered)
+    ft_match = re.search(r"(\d)\s*(?:ft|foot|feet|')\s*(\d{1,2})?", lowered)
     if ft_match:
         feet = int(ft_match.group(1))
         inches = int(ft_match.group(2) or 0)
