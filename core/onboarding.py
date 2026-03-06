@@ -632,8 +632,92 @@ _STEP_EXTRACTION_SCHEMA = {
 }
 
 
+_VALID_ENUMS = {
+    "sex": {"male", "female"},
+    "primary_goal": {"muscle_gain", "fat_loss", "recomp", "maintain"},
+    "experience_level": {"beginner", "intermediate", "advanced"},
+    "equipment_access": {"full_gym", "home_gym", "minimal"},
+    "emphasis_preference": {"balanced", "upper", "lower", "arms"},
+    "nutrition_mode": {"tracked", "ad_libitum"},
+    "communication_preference": {"daily", "training_days_only", "weekly"},
+    "injury_status": {"none", "has_injury", "diagnosed_or_rehabbed", "movement_specific"},
+}
+
+_NUMERIC_RANGES = {
+    "age_years": (13, 100, int),
+    "height_cm": (100.0, 250.0, float),
+    "body_weight_lbs": (50.0, 700.0, float),
+    "estimated_body_fat_pct": (2.0, 65.0, float),
+    "training_age_months": (0, 720, int),
+    "training_days_per_week": (1, 7, int),
+    "activity_multiplier": (1.2, 2.0, float),
+}
+
+
+def _normalize_extracted(data: dict[str, Any]) -> dict[str, Any]:
+    """Normalize and validate AI-extracted values before they enter the profile.
+
+    Ensures all values match the types and constraints expected by Supabase:
+    - Enum fields are lowercased and validated against allowed values
+    - Numeric fields are cast to the correct type and clamped to valid ranges
+    - Booleans are coerced from truthy/falsy values
+    - Invalid or out-of-range values are silently dropped
+    """
+    cleaned: dict[str, Any] = {}
+    for key, value in data.items():
+        if value is None:
+            continue
+
+        # Enum fields
+        if key in _VALID_ENUMS:
+            normalized = str(value).strip().lower().replace(" ", "_").replace("-", "_")
+            # Common AI synonyms
+            synonyms = {
+                "habit_based": "ad_libitum", "habit": "ad_libitum", "no_tracking": "ad_libitum",
+                "training_days": "training_days_only",
+                "no_injuries": "none", "no_injury": "none", "healthy": "none",
+            }
+            normalized = synonyms.get(normalized, normalized)
+            if normalized in _VALID_ENUMS[key]:
+                cleaned[key] = normalized
+            continue
+
+        # Numeric fields
+        if key in _NUMERIC_RANGES:
+            lo, hi, cast = _NUMERIC_RANGES[key]
+            try:
+                num = cast(value)
+                if lo <= num <= hi:
+                    cleaned[key] = round(num, 1) if cast is float else num
+            except (ValueError, TypeError):
+                pass
+            continue
+
+        # Boolean fields
+        if key in ("uses_whoop", "uses_withings", "body_fat_unknown", "medical_disclaimer_acknowledged"):
+            if isinstance(value, bool):
+                cleaned[key] = value
+            elif isinstance(value, str):
+                cleaned[key] = value.strip().lower() in ("true", "yes", "1")
+            continue
+
+        # String fields (injury_notes, injury_details, etc.) — pass through if non-empty
+        if isinstance(value, str) and value.strip():
+            cleaned[key] = value.strip()
+        elif not isinstance(value, str):
+            cleaned[key] = value
+
+    return cleaned
+
+
 async def _agentic_extract(text: str, step: str) -> dict[str, Any]:
-    """Use Claude to extract structured data from an ambiguous user answer."""
+    """Use Claude to extract structured data from a user's message, then normalize it.
+
+    Sends the user's text to Claude with a structured schema prompt.
+    The raw extraction is then passed through _normalize_extracted() to
+    enforce types, ranges, and valid enum values before anything touches
+    the profile or database.
+    """
     schema = _STEP_EXTRACTION_SCHEMA.get(step)
     if not schema:
         return {}
@@ -649,17 +733,13 @@ async def _agentic_extract(text: str, step: str) -> dict[str, Any]:
     context = {"telegram_id": 0, "username": "system", "onboarding_extraction": True}
     try:
         raw = await get_coaching_response(prompt, context)
-        # Strip markdown code fences if present
         cleaned = raw.strip()
         if cleaned.startswith("```"):
             cleaned = cleaned.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
         result = json.loads(cleaned)
-        # Filter out null values and validate types
-        extracted = {}
-        for key, value in result.items():
-            if value is not None and key in schema["fields"]:
-                extracted[key] = value
-        return extracted
+        # Filter to known fields, then normalize
+        extracted = {k: v for k, v in result.items() if v is not None and k in schema["fields"]}
+        return _normalize_extracted(extracted)
     except Exception:
         return {}
 
@@ -695,7 +775,7 @@ async def _agentic_summary_update(text: str) -> dict[str, Any]:
         if cleaned.startswith("```"):
             cleaned = cleaned.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
         result = json.loads(cleaned)
-        return {k: v for k, v in result.items() if v is not None}
+        return _normalize_extracted({k: v for k, v in result.items() if v is not None})
     except Exception:
         return {}
 

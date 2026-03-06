@@ -173,37 +173,22 @@ def upsert_onboarding_state(
     logger.info(f"Upserted onboarding state for telegram_id={telegram_id}")
 
 
+_PROFILE_COLUMNS = [
+    "sex", "age_years", "height_cm", "body_weight_lbs", "estimated_body_fat_pct",
+    "activity_multiplier", "primary_goal", "experience_level", "training_days_per_week",
+    "nutrition_mode", "training_age_months", "injury_notes", "injury_details",
+    "injury_status", "equipment_access", "emphasis_preference", "communication_preference",
+    "age_under_18", "medical_disclaimer_acknowledged", "medical_clearance_confirmed",
+    "uses_whoop", "uses_withings", "onboarding_status", "onboarding_completed_at",
+    "target_wake_time", "target_bedtime",
+]
+
+
 def upsert_user_profile(telegram_id: int, profile: dict) -> None:
-    payload = {
-        "user_id": telegram_id,
-        "sex": profile.get("sex"),
-        "age_years": profile.get("age_years"),
-        "height_cm": profile.get("height_cm"),
-        "body_weight_lbs": profile.get("body_weight_lbs"),
-        "estimated_body_fat_pct": profile.get("estimated_body_fat_pct"),
-        "activity_multiplier": profile.get("activity_multiplier"),
-        "primary_goal": profile.get("primary_goal"),
-        "experience_level": profile.get("experience_level"),
-        "training_days_per_week": profile.get("training_days_per_week"),
-        "nutrition_mode": profile.get("nutrition_mode"),
-        "training_age_months": profile.get("training_age_months"),
-        "injury_notes": profile.get("injury_notes"),
-        "injury_details": profile.get("injury_details"),
-        "injury_status": profile.get("injury_status"),
-        "equipment_access": profile.get("equipment_access"),
-        "emphasis_preference": profile.get("emphasis_preference"),
-        "communication_preference": profile.get("communication_preference"),
-        "age_under_18": profile.get("age_under_18"),
-        "medical_disclaimer_acknowledged": profile.get("medical_disclaimer_acknowledged"),
-        "medical_clearance_confirmed": profile.get("medical_clearance_confirmed"),
-        "uses_whoop": profile.get("uses_whoop"),
-        "uses_withings": profile.get("uses_withings"),
-        "onboarding_status": profile.get("onboarding_status"),
-        "onboarding_completed_at": profile.get("onboarding_completed_at"),
-        "target_wake_time": profile.get("target_wake_time"),
-        "target_bedtime": profile.get("target_bedtime"),
-        "updated_at": datetime.now(timezone.utc).isoformat(),
-    }
+    payload = {"user_id": telegram_id, "updated_at": datetime.now(timezone.utc).isoformat()}
+    for col in _PROFILE_COLUMNS:
+        if col in profile and profile[col] is not None:
+            payload[col] = profile[col]
     _postgrest_upsert("user_profiles", payload, "user_id")
     logger.info(f"Upserted user profile for telegram_id={telegram_id}")
 
