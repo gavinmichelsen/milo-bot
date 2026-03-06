@@ -978,7 +978,14 @@ def _wearables_label(profile: dict[str, Any]) -> str:
 def _format_height(height_cm: Any) -> str:
     if height_cm is None:
         return "N/A"
-    return f"{height_cm} cm"
+    try:
+        cm = float(height_cm)
+        total_inches = round(cm / 2.54)
+        feet = total_inches // 12
+        inches = total_inches % 12
+        return f"{feet}'{inches}\""
+    except (ValueError, TypeError):
+        return f"{height_cm} cm"
 
 
 def _format_weight(weight_lbs: Any) -> str:
