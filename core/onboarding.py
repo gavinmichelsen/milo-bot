@@ -38,6 +38,9 @@ BUTTONS_GOAL = [
     [("Get bigger", "muscle_gain"), ("Get leaner", "fat_loss")],
     [("Both / recomp", "recomp"), ("Maintain", "maintain")],
 ]
+BUTTONS_TRAINING_DAYS = [
+    [("2 days", "2"), ("3 days", "3"), ("4 days", "4"), ("5 days", "5")],
+]
 BUTTONS_EQUIPMENT = [
     [("Full gym", "full_gym"), ("Home gym", "home_gym"), ("Minimal", "minimal")],
 ]
@@ -85,17 +88,22 @@ INJURY_FOLLOWUP_PROMPT = (
 
 GOAL_PROMPT = (
     "Now for what you actually want:\n\n"
-    "1. What's your main goal right now? Getting bigger, getting leaner, or both — basically improving how you look and what you can do?\n"
-    "2. How many days per week can you realistically train? Be honest — 3 consistent days beats 5 days when you skip two."
+    "What's your main goal right now? Getting bigger, getting leaner, or both — basically improving how you look and what you can do?"
+)
+
+TRAINING_DAYS_PROMPT = (
+    "How many days per week can you realistically train? Be honest — 3 consistent days beats 5 days when you skip two."
 )
 
 EQUIPMENT_PROMPT = (
-    "Last couple of logistical questions:\n\n"
-    "1. Which best describes your setup?\n"
-    "  *Full gym* — barbell, squat rack, bench, dumbbells, cable machine, pull-up bar, leg press, machines\n"
-    "  *Home gym* — power rack/squat stand, barbell, dumbbells, bench (no machines)\n"
-    "  *Minimal* — dumbbells, bands, bodyweight only\n\n"
-    "2. Any training emphasis? Upper body, lower body, arms — or just balanced across everything? (say balanced if unsure)"
+    "Which best describes your setup?\n\n"
+    "*Full gym* — barbell, squat rack, bench, dumbbells, cable machine, pull-up bar, leg press, machines\n"
+    "*Home gym* — power rack/squat stand, barbell, dumbbells, bench (no machines)\n"
+    "*Minimal* — dumbbells, bands, bodyweight only"
+)
+
+EMPHASIS_PROMPT = (
+    "Any training emphasis? Upper body, lower body, arms — or just balanced across everything?"
 )
 
 NUTRITION_PROMPT = (
@@ -341,46 +349,52 @@ async def process_onboarding_message(telegram_id: int, username: str, message_te
             return [_msg(f"I still need {' and '.join(missing)}."), _msg(TRAINING_PROMPT)]
         if profile.get("injury_notes"):
             return _transition(telegram_id, profile, "injury_followup", INJURY_FOLLOWUP_PROMPT)
-        return _transition(telegram_id, profile, "goal_schedule", GOAL_PROMPT)
+        return _transition(telegram_id, profile, "goal", GOAL_PROMPT)
 
     if step == "injury_followup":
         profile["injury_details"] = text
         ai_extracted = await _agentic_extract(text, "injury_followup")
         profile["injury_status"] = ai_extracted.get("injury_status", "movement_specific")
-        return _transition(telegram_id, profile, "goal_schedule", GOAL_PROMPT, prefix="Thanks for the detail — I'll build around that.")
+        return _transition(telegram_id, profile, "goal", GOAL_PROMPT, prefix="Thanks for the detail — I'll build around that.")
 
-    if step == "goal_schedule":
-        ai_extracted = await _agentic_extract(text, "goal_schedule")
-        for key in ("primary_goal", "training_days_per_week"):
-            if profile.get(key) is None and key in ai_extracted:
-                profile[key] = ai_extracted[key]
-        missing = []
+    if step == "goal":
+        ai_extracted = await _agentic_extract(text, "goal")
+        if profile.get("primary_goal") is None and "primary_goal" in ai_extracted:
+            profile["primary_goal"] = ai_extracted["primary_goal"]
         if profile.get("primary_goal") is None:
-            missing.append("your main goal")
-        if profile.get("training_days_per_week") is None:
-            missing.append("training days per week")
-        if missing:
-            upsert_onboarding_state(telegram_id, current_step="goal_schedule", profile_data=profile, last_question=GOAL_PROMPT)
-            return [_msg(f"I still need {' and '.join(missing)}."), _msg(GOAL_PROMPT, BUTTONS_GOAL)]
+            upsert_onboarding_state(telegram_id, current_step="goal", profile_data=profile, last_question=GOAL_PROMPT)
+            return [_msg("I still need your main goal."), _msg(GOAL_PROMPT, BUTTONS_GOAL)]
         messages = []
         if profile.get("primary_goal") == "recomp":
             messages.append(_msg("That makes total sense — most people want to look better and get stronger. The good news is those goals overlap a lot. For now, we'll treat this as a recomp starting point and tighten it up once I have your full picture."))
-        messages.extend(_transition(telegram_id, profile, "equipment", EQUIPMENT_PROMPT))
+        messages.extend(_transition(telegram_id, profile, "training_days", TRAINING_DAYS_PROMPT))
         return messages
+
+    if step == "training_days":
+        ai_extracted = await _agentic_extract(text, "training_days")
+        if profile.get("training_days_per_week") is None and "training_days_per_week" in ai_extracted:
+            profile["training_days_per_week"] = ai_extracted["training_days_per_week"]
+        if profile.get("training_days_per_week") is None:
+            upsert_onboarding_state(telegram_id, current_step="training_days", profile_data=profile, last_question=TRAINING_DAYS_PROMPT)
+            return [_msg("I still need how many days per week you can train."), _msg(TRAINING_DAYS_PROMPT, BUTTONS_TRAINING_DAYS)]
+        return _transition(telegram_id, profile, "equipment", EQUIPMENT_PROMPT)
 
     if step == "equipment":
         ai_extracted = await _agentic_extract(text, "equipment")
-        for key in ("equipment_access", "emphasis_preference"):
-            if profile.get(key) is None and key in ai_extracted:
-                profile[key] = ai_extracted[key]
-        missing = []
+        if profile.get("equipment_access") is None and "equipment_access" in ai_extracted:
+            profile["equipment_access"] = ai_extracted["equipment_access"]
         if profile.get("equipment_access") is None:
-            missing.append("equipment setup")
-        if profile.get("emphasis_preference") is None:
-            missing.append("training emphasis")
-        if missing:
             upsert_onboarding_state(telegram_id, current_step="equipment", profile_data=profile, last_question=EQUIPMENT_PROMPT)
-            return [_msg(f"I still need your {' and '.join(missing)}."), _msg(EQUIPMENT_PROMPT, BUTTONS_EQUIPMENT)]
+            return [_msg("I still need your equipment setup."), _msg(EQUIPMENT_PROMPT, BUTTONS_EQUIPMENT)]
+        return _transition(telegram_id, profile, "emphasis", EMPHASIS_PROMPT)
+
+    if step == "emphasis":
+        ai_extracted = await _agentic_extract(text, "emphasis")
+        if profile.get("emphasis_preference") is None and "emphasis_preference" in ai_extracted:
+            profile["emphasis_preference"] = ai_extracted["emphasis_preference"]
+        if profile.get("emphasis_preference") is None:
+            upsert_onboarding_state(telegram_id, current_step="emphasis", profile_data=profile, last_question=EMPHASIS_PROMPT)
+            return [_msg("I still need your training emphasis."), _msg(EMPHASIS_PROMPT, BUTTONS_EMPHASIS)]
         return _transition(telegram_id, profile, "nutrition_mode", NUTRITION_PROMPT)
 
     if step == "nutrition_mode":
@@ -407,8 +421,22 @@ async def process_onboarding_message(telegram_id: int, username: str, message_te
             return [_msg("Just tell me Whoop, Withings, both, or neither."), _msg(WEARABLES_PROMPT, BUTTONS_WEARABLES)]
         profile["uses_whoop"] = ai_extracted.get("uses_whoop", False)
         profile["uses_withings"] = ai_extracted.get("uses_withings", False)
-        prefix = "Once you connect those in the app, I'll be able to use your actual recovery and sleep data to guide training intensity. It won't change the fundamental program — it just lets me fine-tune things." if profile.get("uses_whoop") or profile.get("uses_withings") else "No worries — I'll use your self-reported readiness and training performance as my primary signals. Works fine."
-        return _transition(telegram_id, profile, "communication", COMMUNICATION_PROMPT, prefix=prefix)
+        messages: list[OnboardingMessage] = []
+        if profile.get("uses_whoop") or profile.get("uses_withings"):
+            devices = []
+            if profile.get("uses_whoop"):
+                devices.append("Whoop")
+            if profile.get("uses_withings"):
+                devices.append("Withings")
+            messages.append(_msg(
+                f"Great — let's connect your {' and '.join(devices)} now so I can start pulling data right away. "
+                "Use /connect to link your account. You can do it now or come back to it later, but the sooner it's connected, "
+                "the smarter your coaching gets."
+            ))
+        else:
+            messages.append(_msg("No worries — I'll use your self-reported readiness and training performance as my primary signals. Works fine."))
+        messages.extend(_transition(telegram_id, profile, "communication", COMMUNICATION_PROMPT))
+        return messages
 
     if step == "communication":
         ai_extracted = await _agentic_extract(text, "communication")
@@ -480,8 +508,10 @@ async def _complete_onboarding(telegram_id: int, username: str, profile: dict[st
 
 STEP_BUTTONS = {
     "welcome_ready": BUTTONS_WELCOME,
-    "goal_schedule": BUTTONS_GOAL,
+    "goal": BUTTONS_GOAL,
+    "training_days": BUTTONS_TRAINING_DAYS,
     "equipment": BUTTONS_EQUIPMENT,
+    "emphasis": BUTTONS_EMPHASIS,
     "nutrition_mode": BUTTONS_NUTRITION,
     "wearables": BUTTONS_WEARABLES,
     "communication": BUTTONS_COMMUNICATION,
@@ -509,10 +539,14 @@ def _prompt_for_step(step: str | None, profile: dict[str, Any]) -> str:
         return TRAINING_PROMPT
     if step == "injury_followup":
         return INJURY_FOLLOWUP_PROMPT
-    if step == "goal_schedule":
+    if step == "goal":
         return GOAL_PROMPT
+    if step == "training_days":
+        return TRAINING_DAYS_PROMPT
     if step == "equipment":
         return EQUIPMENT_PROMPT
+    if step == "emphasis":
+        return EMPHASIS_PROMPT
     if step == "nutrition_mode":
         return NUTRITION_PROMPT
     if step == "wearables":
@@ -543,8 +577,10 @@ STEP_CONTEXT = {
     "weight_bodyfat": "asking for their weight and body fat percentage",
     "training_background": "asking about their training history and injuries",
     "injury_followup": "asking about injury details",
-    "goal_schedule": "asking about their fitness goal and training days per week",
-    "equipment": "asking about their gym equipment and training emphasis preference",
+    "goal": "asking about their main fitness goal",
+    "training_days": "asking how many days per week they can train",
+    "equipment": "asking about their gym equipment setup",
+    "emphasis": "asking about their training emphasis preference",
     "nutrition_mode": "asking whether they want tracked calories or habit-based coaching",
     "wearables": "asking if they use Whoop or Withings wearables",
     "communication": "asking about their preferred coaching frequency",
@@ -594,17 +630,27 @@ _STEP_EXTRACTION_SCHEMA = {
             "injury_status": "'none' if no injuries, 'has_injury' otherwise",
         },
     },
-    "goal_schedule": {
-        "instructions": "Extract their primary goal and training days per week.",
+    "goal": {
+        "instructions": "Extract the user's primary fitness goal.",
         "fields": {
             "primary_goal": "one of: muscle_gain, fat_loss, recomp, maintain",
+        },
+    },
+    "training_days": {
+        "instructions": "Extract how many days per week the user can train.",
+        "fields": {
             "training_days_per_week": "integer 1-7",
         },
     },
     "equipment": {
-        "instructions": "Extract their gym equipment level and training emphasis preference.",
+        "instructions": "Extract their gym equipment level.",
         "fields": {
             "equipment_access": "one of: full_gym, home_gym, minimal",
+        },
+    },
+    "emphasis": {
+        "instructions": "Extract their training emphasis preference.",
+        "fields": {
             "emphasis_preference": "one of: balanced, upper, lower, arms (default to 'balanced' if not specified)",
         },
     },
